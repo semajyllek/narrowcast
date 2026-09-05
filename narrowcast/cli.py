@@ -12,7 +12,10 @@ from pathlib import Path
 
 from narrowcast import build as B
 from narrowcast import card as C
-from narrowcast import encoders, hub as HUB, labels as S, plan as P, sources as SRC
+from narrowcast import build as B  # noqa: F811
+from narrowcast import config as CFG
+from narrowcast import encoders, hub as HUB, labels as S, plan as P
+from narrowcast import sources as SRC, sweep as SW
 
 
 def _species_arg(args) -> list[str]:
@@ -106,6 +109,77 @@ def cmd_build(args):
     return 0
 
 
+def _candidates(cfg):
+    """Encoders to try: the config's own list, else the built-in registry plus a
+    Hub search, both filtered to the size budget."""
+    if cfg.encoders:
+        return [(e, encoders.BY_VARIANT[e].size_mb() if e in encoders.BY_VARIANT else None)
+                for e in cfg.encoders]
+    built_in = [(e.variant, e.size_mb()) for e in encoders.ENCODERS
+                if cfg.max_size_mb is None or e.size_mb() <= cfg.max_size_mb]
+    found = []
+    if cfg.domain:
+        fitting, _, _ = HUB.search(cfg.domain, budget_mb=cfg.max_size_mb)
+        found = [(c.repo, c.size_mb()) for c in fitting]
+    seen, out = set(), []
+    for name, size in built_in + found:
+        if name not in seen:
+            seen.add(name)
+            out.append((name, size))
+    return out[: cfg.max_candidates]
+
+
+def cmd_fit(args):
+    """Search encoders under a size budget until one clears the metric floor."""
+    cfg = CFG.load(args.config)
+    rows = SRC.load(**cfg.data)
+    background = SRC.load(**cfg.background) if cfg.background else None
+    cands = _candidates(cfg)
+    if not cands:
+        raise SystemExit(f"no candidate encoders fit {cfg.max_size_mb} MB")
+    # Precomputed vectors pin the encoder: `load_rows` returns them untouched and
+    # never runs a model, so sweeping N encoders over one embeddings file scores
+    # the same numbers N times and calls them a frontier. Refuse rather than
+    # produce a comparison that cannot be real.
+    if "embeddings" in cfg.data and len(cands) > 1:
+        raise SystemExit(
+            f"`data.embeddings` pins the encoder that produced it, so a sweep over "
+            f"{len(cands)} candidates would score identical numbers {len(cands)} times.\n"
+            f"Use `data.images` or `data.manifest` to sweep, or name exactly one "
+            f"encoder in `constraints.encoders`.")
+
+    print(f"\n  task {cfg.task}: {len(rows)} rows, {len(rows.labels)} labels")
+    print(f"  trying {len(cands)} encoder(s) against {cfg.metric} >= {cfg.minimum}\n",
+          flush=True)
+    results = SW.run(cands, rows, background, cfg.metric, cfg.ood_rate, cfg.hazards,
+                     on_result=lambda r: print(
+                         f"    {r.encoder[:38]:38s} "
+                         f"{'failed' if r.error else f'{r.value(cfg.metric):.4f}'}",
+                         file=sys.stderr, flush=True))
+    print()
+    print(SW.render(results, cfg.metric, cfg.minimum, cfg.max_size_mb))
+
+    pick = SW.choose(results, cfg.metric, cfg.minimum)
+    if pick is None:
+        best, gap = SW.shortfall(results, cfg.metric, cfg.minimum)
+        print(f"\n  REFUSED: nothing reached {cfg.metric} >= {cfg.minimum}.")
+        if best is not None:
+            print(f"  Closest was {best.encoder} at {best.value(cfg.metric):.4f}, "
+                  f"short by {gap:.4f}.")
+        print("  No bundle written. Lower the floor, raise the size budget, or "
+              "supply better data.\n")
+        return 1
+
+    print(f"\n  selected {pick.encoder} — smallest that clears the floor\n")
+    ds = B.load_rows(rows, pick.encoder, background=background)
+    clf = B.fit_head(ds)
+    comp = S.analyse(rows.labels, pool=rows.labels)
+    out = B.save_bundle(Path(args.out), clf, rows.labels, pick.encoder, pick.metrics,
+                        comp, ds.counts, source=str(cfg.data), hazards=list(cfg.hazards))
+    print(f"  bundle {out}\n  card   {C.write(out)}\n")
+    return 0
+
+
 def cmd_encoders(args):
     """Candidate encoders from the Hub, size-verified locally."""
     terms = tuple(args.domain or ())
@@ -169,6 +243,12 @@ def main(argv=None):
                        help="size budget in MB (int4 assumed)")
     p_enc.add_argument("--top", type=int, default=12)
     p_enc.set_defaults(fn=cmd_encoders)
+
+    p_fit = sub.add_parser("fit", help="search encoders under a size budget until "
+                                       "one clears a metric floor")
+    p_fit.add_argument("--config", required=True, help="task config (YAML or JSON)")
+    p_fit.add_argument("--out", required=True, help="bundle directory to write")
+    p_fit.set_defaults(fn=cmd_fit)
 
     p_card = sub.add_parser("card", help="print the card for a built bundle")
     p_card.add_argument("bundle")

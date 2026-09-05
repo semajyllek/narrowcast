@@ -445,3 +445,75 @@ def test_render_states_these_are_candidates_not_recommendations():
     c = hub.Candidate("a/plant-x", 10_000_000, 500, 0, None, None, matched=("plant",))
     out = hub.render([c], [], [], budget_mb=50)
     assert "Candidates, not recommendations" in out
+
+
+# ---- config validation -----------------------------------------------------
+
+from narrowcast import config as CFG, sweep as SW  # noqa: E402
+
+_MIN = {"data": {"images": "./x"}, "objective": {"metric": "label_share", "minimum": 0.9}}
+
+
+def test_config_parses_a_minimal_task():
+    c = CFG.parse(_MIN)
+    assert c.metric == "label_share" and c.minimum == 0.9
+    assert c.data == {"images": "./x"} and c.max_size_mb is None
+
+
+def test_config_rejects_an_unknown_metric():
+    bad = {**_MIN, "objective": {"metric": "f1_score", "minimum": 0.9}}
+    with pytest.raises(ValueError, match="unknown metric"):
+        CFG.parse(bad)
+
+
+def test_config_rejects_a_minimum_outside_zero_one():
+    bad = {**_MIN, "objective": {"metric": "coverage", "minimum": 90}}
+    with pytest.raises(ValueError, match="fraction in"):
+        CFG.parse(bad)
+
+
+def test_config_requires_exactly_one_data_source():
+    with pytest.raises(ValueError, match="exactly one"):
+        CFG.parse({**_MIN, "data": {"images": "a", "manifest": "b"}})
+    with pytest.raises(ValueError, match="exactly one"):
+        CFG.parse({**_MIN, "data": {}})
+
+
+def test_config_names_the_field_it_is_complaining_about():
+    """A typo that silently becomes a default is how a constraint gets believed."""
+    with pytest.raises(ValueError, match="`objective` needs a `minimum`"):
+        CFG.parse({**_MIN, "objective": {"metric": "coverage"}})
+
+
+# ---- sweep decision rules --------------------------------------------------
+
+def _r(name, size, val, metric="label_share"):
+    return SW.Result(name, size, {metric: val, "coverage": 0.8, "precision": 0.9})
+
+
+def test_choose_takes_the_smallest_that_qualifies_not_the_best():
+    """Size is the declared constraint; accuracy above the floor is not worth bytes."""
+    rs = [_r("big", 152.0, 0.98), _r("small", 17.9, 0.91), _r("mid", 43.3, 0.96)]
+    assert SW.choose(rs, "label_share", 0.90).encoder == "small"
+
+
+def test_choose_returns_none_when_nothing_clears_the_floor():
+    rs = [_r("a", 10.0, 0.80), _r("b", 20.0, 0.85)]
+    assert SW.choose(rs, "label_share", 0.90) is None
+
+
+def test_shortfall_names_the_closest_candidate_and_the_gap():
+    rs = [_r("a", 10.0, 0.80), _r("b", 20.0, 0.87)]
+    best, gap = SW.shortfall(rs, "label_share", 0.90)
+    assert best.encoder == "b" and gap == pytest.approx(0.03)
+
+
+def test_a_failed_candidate_does_not_end_the_sweep_or_get_chosen():
+    rs = [SW.Result("broken", 5.0, None, "RuntimeError: boom"), _r("ok", 20.0, 0.95)]
+    assert SW.choose(rs, "label_share", 0.90).encoder == "ok"
+    assert "failed" in SW.render(rs, "label_share", 0.90)
+
+
+def test_render_shows_the_floor_and_marks_what_clears_it():
+    out = SW.render([_r("a", 20.0, 0.95), _r("b", 10.0, 0.80)], "label_share", 0.90)
+    assert "floor: label_share >= 0.9000" in out and "ok" in out

@@ -58,6 +58,56 @@ first whitespace token. Right for Linnaean binomials, overridable everywhere els
 Where the data came from — which corpus, under what licence, reconciled against
 whose taxonomy — is a domain decision, so it lives in your project, not here.
 
+## Constraint-driven: `fit`
+
+Declare what you need and let it search:
+
+```yaml
+task: oregon-plants
+data:        { manifest: ./data.parquet, background: { manifest: ./neg.parquet } }
+objective:   { metric: label_share, minimum: 0.90 }
+constraints: { max_size_mb: 50, domain: [plant, flora] }
+```
+
+```bash
+narrowcast fit --config task.yaml --out models/mine
+```
+
+Candidates come from the built-in registry plus a Hub search, both size-filtered.
+Each runs through the same path a single `build` uses, so the frontier and the
+card cannot disagree:
+
+```
+  encoder                       int4    label_share
+  plantclef24                  43.3M         0.9246  ok    cov 0.790 prec 0.994
+  mobileclip2_s2               17.9M         0.7166        cov 0.612 prec 0.973
+
+  floor: label_share >= 0.9000, budget 50 MB
+  selected plantclef24 — smallest that clears the floor
+```
+
+It picks the **smallest that clears the floor**, not the best: size is the
+constraint you declared, and accuracy above your floor is not worth paying bytes
+for.
+
+**When nothing clears it, `fit` refuses** — prints the frontier, names the
+closest candidate and the gap, writes no bundle, and exits non-zero so CI can
+gate on it:
+
+```
+  REFUSED: nothing reached label_share >= 0.99.
+  Closest was plantclef24 at 0.9379, short by 0.0521.
+  No bundle written. Lower the floor, raise the size budget, or supply better data.
+```
+
+That refusal is the point. `minimum` is only a meaningful contract because the
+card's numbers are trustworthy.
+
+> `data.embeddings` pins the encoder that produced them, so `fit` refuses to
+> sweep several candidates over one embeddings file — it would score identical
+> numbers N times and present them as a comparison. Sweeping needs `images` or
+> `manifest`.
+
 ## Finding an encoder
 
 ```bash
