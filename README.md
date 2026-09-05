@@ -58,6 +58,30 @@ first whitespace token. Right for Linnaean binomials, overridable everywhere els
 Where the data came from — which corpus, under what licence, reconciled against
 whose taxonomy — is a domain decision, so it lives in your project, not here.
 
+## Finding an encoder
+
+```bash
+narrowcast encoders --domain plant --domain flora --budget 50
+```
+
+Queries the Hugging Face Hub for image encoders and verifies each candidate's
+size **client-side** from `safetensors.total`. The Hub's own `num_parameters`
+filter cannot be trusted — asking for `<100M` returns 303M models, because repos
+without an indexed count pass through silently. Candidates whose size is not
+published are listed separately rather than assumed small.
+
+For many domains someone has already fine-tuned an encoder, and using theirs
+beats compressing a general one. That is not speculation: the strongest
+size/accuracy point in the parent project came from an off-the-shelf
+domain-fine-tuned ViT-B that matched a model 3.5× its size and beat it on hazard
+safety — found by accident.
+
+**These are candidates, not recommendations.** Ranking is a name match plus
+popularity, which is a weak proxy for fitness: a plant query returns mostly
+*disease* classifiers when you asked about species. The search narrows the field;
+`build` and `card` decide. That division is deliberate — the search does not need
+to be clever when evaluating a candidate honestly is cheap.
+
 ## Three commands
 
 **`plan`** — seconds, no training, no downloads. Finds crowded groups and names

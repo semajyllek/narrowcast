@@ -12,7 +12,7 @@ from pathlib import Path
 
 from narrowcast import build as B
 from narrowcast import card as C
-from narrowcast import encoders, labels as S, plan as P, sources as SRC
+from narrowcast import encoders, hub as HUB, labels as S, plan as P, sources as SRC
 
 
 def _species_arg(args) -> list[str]:
@@ -106,6 +106,18 @@ def cmd_build(args):
     return 0
 
 
+def cmd_encoders(args):
+    """Candidate encoders from the Hub, size-verified locally."""
+    terms = tuple(args.domain or ())
+    print(f"\n  searching the Hub"
+          + (f" for: {', '.join(terms)}" if terms else " (no domain terms)"), flush=True)
+    f, o, u = HUB.search(terms, budget_mb=args.budget)
+    print()
+    print(HUB.render(f, o, u, budget_mb=args.budget, top=args.top))
+    print()
+    return 0
+
+
 def cmd_card(args):
     manifest = B.load_bundle(Path(args.bundle))
     print(C.render(manifest))
@@ -149,6 +161,14 @@ def main(argv=None):
     p_build = sub.add_parser("build", help="fit, measure, and write a bundle")
     common(p_build, out=True)
     p_build.set_defaults(fn=cmd_build)
+
+    p_enc = sub.add_parser("encoders", help="find candidate encoders that fit a size budget")
+    p_enc.add_argument("--domain", action="append", metavar="TERM",
+                       help="domain term, e.g. plant / car / painting; repeatable")
+    p_enc.add_argument("--budget", type=float, metavar="MB",
+                       help="size budget in MB (int4 assumed)")
+    p_enc.add_argument("--top", type=int, default=12)
+    p_enc.set_defaults(fn=cmd_encoders)
 
     p_card = sub.add_parser("card", help="print the card for a built bundle")
     p_card.add_argument("bundle")

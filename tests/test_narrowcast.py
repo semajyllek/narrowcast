@@ -394,3 +394,54 @@ def test_read_list_still_normalises_a_pure_binomial_list(tmp_path):
     f = tmp_path / "l.txt"
     f.write_text("Sedum acre L.\nTrifolium repens\n")
     assert labels.read_list(f) == ["Sedum acre", "Trifolium repens"]
+
+
+# ---- hub search: candidate generation, size verified locally ---------------
+
+from narrowcast import hub  # noqa: E402
+
+
+def test_whole_token_match_does_not_reach_substrings():
+    """'art' must not match 'artifact' — it put brain-tumour models atop an art query."""
+    assert hub._matched_terms("roychowdhuryresearch/HFO-artifact", ("art",)) == ()
+    assert hub._matched_terms("lyfesan/vit-brats-artifact-classifier", ("art",)) == ()
+    assert hub._matched_terms("somebody/cardiac-mri", ("car",)) == ()
+
+
+def test_long_terms_prefix_match_concatenated_names():
+    """'plant' must reach 'plantclef2024' — whole-token matching missed the one
+    model that motivated this feature."""
+    assert hub._matched_terms("gerald29/plantclef2024", ("plant",)) == ("plant",)
+    assert hub._matched_terms(
+        "vincent-espitalier/dino-v2-reg4-with-plantclef2024-weights", ("plant",)) == ("plant",)
+
+
+def test_size_is_computed_from_parameters_not_trusted_from_the_hub():
+    c = hub.Candidate("x/y", params=86_000_000, downloads=10, likes=0,
+                      pipeline=None, library=None)
+    assert c.size_mb(4) == pytest.approx(43.0)
+    assert c.fits(50) is True and c.fits(20) is False
+
+
+def test_unpublished_size_is_neither_fits_nor_fails():
+    """A model whose size is unknown is not a model that fits."""
+    c = hub.Candidate("x/y", params=None, downloads=10, likes=0,
+                      pipeline=None, library=None)
+    assert c.fits(50) is None
+    assert c.fits(None) is True
+
+
+def test_domain_match_outranks_popularity_but_not_by_unlimited_margin():
+    obscure_hit = hub.Candidate("a/plant-x", 1, 19, 0, None, None, matched=("plant",))
+    popular_general = hub.Candidate("timm/mobilenetv3", 1, 17_700_000, 0, None, None)
+    obscure_general = hub.Candidate("b/whatever", 1, 5, 0, None, None)
+    rank = lambda c: -(2.0 + __import__("math").log10(c.downloads + 1) / 3.0
+                       if c.matched else __import__("math").log10(c.downloads + 1) / 3.0)
+    assert rank(obscure_hit) < rank(obscure_general)      # domain match wins on a tie
+    assert rank(popular_general) < rank(obscure_general)  # popularity still counts
+
+
+def test_render_states_these_are_candidates_not_recommendations():
+    c = hub.Candidate("a/plant-x", 10_000_000, 500, 0, None, None, matched=("plant",))
+    out = hub.render([c], [], [], budget_mb=50)
+    assert "Candidates, not recommendations" in out
