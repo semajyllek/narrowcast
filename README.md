@@ -109,8 +109,13 @@ pip install -e '.[encode]'  # adds torch/open_clip to turn images into vectors
 
 ## Provenance
 
-Extracted from a plant-identification project. Every claim here is backed by a
-measurement in that repo, including two in-place retractions of earlier versions
-of these same claims.
+Extracted from [plantid](https://github.com/semajyllek/plantid). Every claim on
+this page is backed by a measurement there — see `EMBEDDED_FINDINGS.md`,
+`OREGON_SAFETY_FINDINGS.md`, `BIRDS_FINDINGS.md` and `CONTAMINATION_FINDINGS.md`,
+including two in-place retractions of earlier versions of these same claims.
 
-MIT.
+The numbers here come from one domain and one encoder family. The *structural*
+warnings generalise — that is what the bird replication establishes — but if you
+run narrowcast somewhere new, its measurements are the ones to trust, not these.
+
+MIT — see [LICENSE](LICENSE).
