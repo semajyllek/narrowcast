@@ -9,7 +9,8 @@ description = "A small classifier over a narrow label set, and the truth about h
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-dependencies = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.3", "pyarrow>=14"]
+dependencies = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.3", "pyarrow>=14",
+                "pyyaml>=6"]
 
 [project.optional-dependencies]
 # Only needed to turn images into vectors. `--embeddings`, `plan` and `card`

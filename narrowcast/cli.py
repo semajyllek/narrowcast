@@ -1,9 +1,10 @@
-"""`narrowcast plan | build | card`.
+"""narrowcast — a small classifier over a narrow label set, and the truth about it.
 
-Usage:
-    PYTHONPATH=. .venv/bin/python -m narrowcast.cli plan --labels my.txt --budget 20
-    PYTHONPATH=. .venv/bin/python -m narrowcast.cli build --labels my.txt --out models/my
-    PYTHONPATH=. .venv/bin/python -m narrowcast.cli card models/my
+    narrowcast fit      --config task.yaml --out models/mine
+    narrowcast plan     --labels my.txt --budget 20
+    narrowcast encoders --domain plant --budget 50
+    narrowcast build    --images ./photos --out models/mine
+    narrowcast card     models/mine
 """
 
 import argparse
@@ -29,7 +30,7 @@ def _species_arg(args) -> list[str]:
                 raise ValueError(f"could not parse {n!r} as 'Genus labels'")
             out.append(c)
         return list(dict.fromkeys(out))
-    raise ValueError("give --labels FILE or one or more --name 'Genus labels'")
+    raise ValueError("give --labels FILE, or one or more --name LABEL")
 
 
 def cmd_plan(args):
@@ -209,7 +210,7 @@ def main(argv=None):
                        help="parquet/csv with columns label, path [, group, cluster]")
         p.add_argument("--embeddings", metavar="FILE",
                        help="npz with descriptor, label [, group, cluster]")
-        p.add_argument("--name", action="append", help="a labels; repeatable")
+        p.add_argument("--name", action="append", help="a label; repeatable")
         p.add_argument("--budget", type=float, metavar="MB",
                        help="size budget for the encoder, in MB")
         p.add_argument("--encoder", choices=sorted(encoders.BY_VARIANT),
