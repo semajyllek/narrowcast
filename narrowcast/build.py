@@ -194,7 +194,7 @@ def hazard_metrics(te, lv, hazards, seed=0) -> dict:
     rather than folded in.
 
     **Group answers count.** A coarse answer naming a group that contains no
-    consequential label is just as actionable as a wrong labels name -- "it is a
+    consequential label is just as actionable as a wrong label -- "it is a
     Lomatium" for poison hemlock is precisely the error that kills foragers. Only
     declining, or answering with the hazard's own group, is safe.
     """

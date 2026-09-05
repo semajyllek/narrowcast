@@ -1,0 +1,763 @@
+<title>Narrow-catalogue classification — a technical deep dive</title>
+<style>
+:root{
+  --paper:#ffffff; --panel:#f7f9fc; --ink:#0b0e14; --ink2:#3d4757; --ink3:#6b7688;
+  --rule:#dde3ec; --blue:#1d4ed8; --blue-soft:#eaf0ff; --green:#047857;
+  --green-soft:#e6f4ef; --warn:#b45309; --code-bg:#f4f7fb;
+  --shadow:0 1px 2px rgba(11,14,20,.04), 0 12px 32px -24px rgba(11,14,20,.4);
+}
+@media (prefers-color-scheme:dark){:root{
+  --paper:#0b0e14; --panel:#121722; --ink:#e8edf5; --ink2:#a7b2c4; --ink3:#7a8598;
+  --rule:#232b3a; --blue:#60a5fa; --blue-soft:#132038; --green:#34d399;
+  --green-soft:#0f2a22; --warn:#fbbf24; --code-bg:#111722;
+  --shadow:0 1px 2px rgba(0,0,0,.6), 0 14px 36px -26px rgba(0,0,0,.9);}}
+:root[data-theme=dark]{
+  --paper:#0b0e14; --panel:#121722; --ink:#e8edf5; --ink2:#a7b2c4; --ink3:#7a8598;
+  --rule:#232b3a; --blue:#60a5fa; --blue-soft:#132038; --green:#34d399;
+  --green-soft:#0f2a22; --warn:#fbbf24; --code-bg:#111722;
+  --shadow:0 1px 2px rgba(0,0,0,.6), 0 14px 36px -26px rgba(0,0,0,.9);}
+:root[data-theme=light]{
+  --paper:#ffffff; --panel:#f7f9fc; --ink:#0b0e14; --ink2:#3d4757; --ink3:#6b7688;
+  --rule:#dde3ec; --blue:#1d4ed8; --blue-soft:#eaf0ff; --green:#047857;
+  --green-soft:#e6f4ef; --warn:#b45309; --code-bg:#f4f7fb;
+  --shadow:0 1px 2px rgba(11,14,20,.04), 0 12px 32px -24px rgba(11,14,20,.4);}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+ font:16.5px/1.7 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:64px 26px 120px}
+h1,h2,h3,h4{font-weight:650;letter-spacing:-.018em;text-wrap:balance;margin:0;line-height:1.18}
+h1{font-size:clamp(32px,5vw,50px);letter-spacing:-.03em}
+h2{font-size:29px;margin-top:12px}
+h3{font-size:20px;margin:34px 0 8px}
+h4{font-size:16px;margin:24px 0 6px;color:var(--ink2)}
+p{margin:14px 0;max-width:74ch}
+a{color:var(--blue)}
+.lede{font-size:19px;color:var(--ink2);max-width:70ch}
+.eyebrow{font:650 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.16em;
+ text-transform:uppercase;color:var(--blue);margin:0 0 14px}
+section{margin-top:66px;scroll-margin-top:20px}
+.sh{border-top:2px solid var(--ink);padding-top:16px;margin-bottom:8px}
+.num{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
+.muted{color:var(--ink3)}
+.toc{background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:20px 24px;margin:34px 0}
+.toc ol{margin:0;padding-left:20px;columns:2;column-gap:34px}
+.toc li{margin:5px 0;break-inside:avoid}
+.toc a{text-decoration:none} .toc a:hover{text-decoration:underline}
+.scroll{overflow-x:auto;margin:20px 0;border:1px solid var(--rule);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:14.5px;min-width:520px}
+th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--rule);white-space:nowrap}
+thead th{background:var(--panel);font:650 11px/1.3 ui-monospace,monospace;letter-spacing:.08em;
+ text-transform:uppercase;color:var(--ink3)}
+tbody tr:last-child td{border-bottom:none}
+td.n,th.n{text-align:right;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums}
+tr.hi td{background:var(--blue-soft)}
+tr.good td{background:var(--green-soft)}
+b.g{color:var(--green)} b.b{color:var(--blue)} b.w{color:var(--warn)}
+pre{background:var(--code-bg);border:1px solid var(--rule);border-radius:8px;padding:16px 18px;
+ overflow-x:auto;font:13.5px/1.62 ui-monospace,SFMono-Regular,Menlo,monospace;margin:18px 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;
+ background:var(--code-bg);border:1px solid var(--rule);padding:1px 5px;border-radius:4px}
+pre code{background:none;border:none;padding:0}
+.math{background:var(--panel);border-left:3px solid var(--blue);border-radius:0 8px 8px 0;
+ padding:16px 20px;margin:20px 0;font:15px/1.9 ui-monospace,SFMono-Regular,Menlo,monospace;
+ overflow-x:auto}
+.math .where{font-family:inherit;font-size:13.5px;color:var(--ink3);display:block;margin-top:10px;
+ line-height:1.6}
+.note{border:1px solid var(--rule);border-left:3px solid var(--green);background:var(--panel);
+ border-radius:0 8px 8px 0;padding:15px 20px;margin:22px 0;box-shadow:var(--shadow)}
+.note.warn{border-left-color:var(--warn)}
+.note.retract{border-left-color:var(--ink3)}
+.note h4{margin:0 0 6px;color:var(--ink)}
+.note p{margin:6px 0}
+.key{font:650 11px/1 ui-monospace,monospace;letter-spacing:.12em;text-transform:uppercase;
+ color:var(--green);display:block;margin-bottom:7px}
+.note.warn .key{color:var(--warn)} .note.retract .key{color:var(--ink3)}
+.mermaid{background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:20px;
+ margin:22px 0;overflow-x:auto;text-align:center}
+.stats{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin:28px 0}
+.stat{background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:16px 18px}
+.stat b{display:block;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;
+ font-size:26px;font-weight:650;letter-spacing:-.02em;line-height:1.1}
+.stat span{display:block;font-size:12.5px;color:var(--ink3);margin-top:6px;line-height:1.4}
+.stat.b b{color:var(--blue)} .stat.g b{color:var(--green)}
+ul,ol{max-width:74ch}li{margin:7px 0}
+del{color:var(--ink3)}
+hr{border:0;border-top:1px solid var(--rule);margin:52px 0}
+footer{margin-top:80px;padding-top:22px;border-top:2px solid var(--ink);color:var(--ink3);font-size:13.5px}
+@media (max-width:640px){.toc ol{columns:1} th,td{white-space:normal}}
+</style>
+
+<div class="wrap">
+
+<p class="eyebrow">Technical reference · September 2026</p>
+<h1>Narrow-catalogue classification over frozen encoders</h1>
+<p class="lede">How to build a small classifier over a label set someone chose by hand,
+decide when it should refuse to answer, and measure it in a way that does not flatter
+it. The central result is that the two metrics everyone reports move the <em>wrong
+way</em> on exactly the label sets that are hardest to use.</p>
+
+<div class="stats">
+  <div class="stat b"><b>0.476</b><span>label-level share, genus-crowded 14-class set</span></div>
+  <div class="stat g"><b>0.761</b><span>same size, same data, distinct groups</span></div>
+  <div class="stat b"><b>0.806</b><span>coverage of the <em>crowded</em> set — higher</span></div>
+  <div class="stat g"><b>0.618</b><span>coverage of the better model — lower</span></div>
+  <div class="stat"><b>6.7%</b><span>hemlock named as something edible, union</span></div>
+  <div class="stat"><b>2.5%</b><span>worst single pre-registered confusion</span></div>
+</div>
+
+<div class="note">
+<span class="key">Scope</span>
+<p><strong>Covered:</strong> the decision rule and its calibration, the evaluation
+protocol, the metric pathology this work exists to expose, and the experiments that
+established or killed each claim.</p>
+<p><strong>Treated as a black box:</strong> the encoders themselves. BioCLIP-2,
+MobileCLIP2 and PlantCLEF2024 are used frozen, never fine-tuned, and are documented
+only by their input/output contract — an image in, an L2-normalised vector out.
+Distillation into a smaller encoder was attempted and failed; see §11.</p>
+<p><strong>Code:</strong> <a href="https://github.com/semajyllek/narrowcast">narrowcast</a>
+(the tool) and <a href="https://github.com/semajyllek/plantid">plantid</a> (the
+research record). Every formula below is transcribed from those sources.</p>
+</div>
+
+<div class="toc">
+<ol>
+<li><a href="#s1">The problem</a></li>
+<li><a href="#s2">Architecture: what is actually built per user</a></li>
+<li><a href="#s3">The three-way cascade</a></li>
+<li><a href="#s4">Why the scores nest</a></li>
+<li><a href="#s5">Declared utilities</a></li>
+<li><a href="#s6">Prevalence anchoring</a></li>
+<li><a href="#s7">Fitting the thresholds</a></li>
+<li><a href="#s8">Evaluation discipline</a></li>
+<li><a href="#s9">The coarse-answer trap</a></li>
+<li><a href="#s10">Safety: per-pair vs. union</a></li>
+<li><a href="#s11">The size/accuracy frontier</a></li>
+<li><a href="#s12">Measuring contamination</a></li>
+<li><a href="#s13">Failure modes and open questions</a></li>
+</ol>
+</div>
+
+<section id="s1">
+<div class="sh"><p class="eyebrow">01</p><h2>The problem</h2></div>
+
+<p>A general-purpose identifier answers over a very large label space — iNaturalist's
+vision model covers ~108,000 taxa. A <em>narrow-catalogue</em> classifier answers over
+a label set someone chose: the twenty plants in a garden, the defect classes on one
+production line, the birds at one feeder.</p>
+
+<p>Narrowing helps enormously. But it introduces a failure mode that has no analogue in
+the wide-label-space setting, and the standard metrics not only fail to detect it —
+they move in the <em>reassuring</em> direction while it happens.</p>
+
+<h3>The setting</h3>
+<p>Given a chosen label set <span class="num">L = {ℓ₁ … ℓ_K}</span>, a group function
+<span class="num">g(ℓ)</span> mapping each label to a coarser rank, and images that may
+or may not depict something in <span class="num">L</span>, produce for each image one
+of three outcomes: <b class="b">name the label</b>, <b class="b">name the group</b>, or
+<b class="b">decline</b>.</p>
+
+<p>The group is what makes this interesting. It gives the model somewhere to retreat to
+that is still informative — "it is an oak, I cannot tell which" — and it is where the
+pathology lives.</p>
+</section>
+
+<section id="s2">
+<div class="sh"><p class="eyebrow">02</p><h2>Architecture: what is actually built per user</h2></div>
+
+<p>The encoder is frozen and shared. What gets built per label set is a multinomial
+logistic head plus two scalar thresholds.</p>
+
+<div class="math">
+φ : image → ℝ<sup>d</sup>&nbsp;&nbsp;(frozen, never updated)<br>
+z = φ(x) / ‖φ(x)‖₂<br>
+P(c | x) = softmax(W z + b)<sub>c</sub>,&nbsp;&nbsp;W ∈ ℝ<sup>(K+1)×d</sup>
+<span class="where">The extra row is <code>__OTHER__</code>, a reject class fitted on
+supplied negatives. d = 512 or 768 depending on encoder.</span>
+</div>
+
+<p>This is the whole personalisation story, and it explains the economics. At K = 20 and
+d = 512 the head is 21 × 512 × 4 bytes ≈ <b class="b">43 KB</b>, against an encoder of
+17.9–152 MB. Fitting it is a few CPU-seconds on cached embeddings.</p>
+
+<div class="note warn">
+<span class="key">Consequence worth internalising</span>
+<p><strong>Choosing fewer labels does not produce a smaller model.</strong> The size is
+almost entirely encoder. A tool that promises "pick 20 classes, get a tiny model" is
+promising something the architecture does not deliver — the head shrinks from 1.5 MB to
+43 KB and the 152 MB encoder does not move at all.</p>
+</div>
+
+<p>The reject class is optional and its absence is <em>reported</em>, not silently
+assumed away:</p>
+
+<pre><code>if background is not None:
+    B = _vecs(background)
+    cut = rng.permutation(len(B))
+    n = int(BG_TRAIN_FRAC * len(B))          # 0.6 to train, 0.4 held out as far-OOD
+    Xtr.append(B[cut[:n]]); ytr.append(np.full(n, OTHER))
+else:
+    notes.append("no background supplied: closed-set only, the model cannot decline")</code></pre>
+</section>
+
+<section id="s3">
+<div class="sh"><p class="eyebrow">03</p><h2>The three-way cascade</h2></div>
+
+<p>Two scalars are computed per image. <span class="num">s</span> is the top label
+posterior; <span class="num">γ</span> is the largest <em>group</em> mass, obtained by
+summing label posteriors within each group.</p>
+
+<div class="math">
+G ∈ {0,1}<sup>M×K</sup>,&nbsp;&nbsp;G<sub>j,i</sub> = 1 ⟺ g(ℓ<sub>i</sub>) = group j<br>
+p = [P(ℓ₁|x) … P(ℓ_K|x)]&nbsp;&nbsp;(the non-OTHER columns)<br><br>
+s = max<sub>i</sub> p<sub>i</sub><br>
+γ = max<sub>j</sub> (G p<sup>T</sup>)<sub>j</sub> = max<sub>j</sub> Σ<sub>i ∈ group j</sub> p<sub>i</sub>
+<span class="where">G is built once per model by <code>group_matrix</code>; γ is a
+matrix product, not a loop.</span>
+</div>
+
+<p>The decision is two thresholded comparisons, evaluated in a fixed order:</p>
+
+<pre><code>def decide(label_conf, group_conf, t_group, t_label):
+    out = np.full(len(label_conf), LABEL, dtype=object)
+    out[label_conf &lt; t_label] = GROUP      # not confident enough to name the label
+    out[group_conf &lt; t_group] = DECLINE    # not confident enough even at group</code></pre>
+
+<p>Order matters: the second assignment overwrites the first, so <code>DECLINE</code>
+dominates. Written as a rule:</p>
+
+<div class="math">
+decide(s, γ) = DECLINE&nbsp;&nbsp;if γ &lt; t<sub>group</sub><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= GROUP&nbsp;&nbsp;&nbsp;&nbsp;if γ ≥ t<sub>group</sub> and s &lt; t<sub>label</sub><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= LABEL&nbsp;&nbsp;&nbsp;&nbsp;otherwise
+</div>
+
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Scored: compute s, γ
+    Scored --> DECLINE: γ &lt; t_group
+    Scored --> Confident: γ ≥ t_group
+    Confident --> GROUP: s &lt; t_label
+    Confident --> LABEL: s ≥ t_label
+    DECLINE --> [*]
+    GROUP --> [*]
+    LABEL --> [*]
+</pre>
+
+<p>There are three reachable states and no others. Critically, the state
+<em>"confident at label, unsure at group"</em> is unreachable — which is not enforced by
+the code but guaranteed by a property of the scores themselves.</p>
+</section>
+
+<section id="s4">
+<div class="sh"><p class="eyebrow">04</p><h2>Why the scores nest</h2></div>
+
+<p>The cascade is well-ordered because <span class="num">s ≤ γ</span> always. The proof
+is one line, and it is the reason the rule can be two independent thresholds rather
+than a joint region.</p>
+
+<div class="math">
+s = max<sub>i</sub> p<sub>i</sub> = p<sub>i*</sub>&nbsp;&nbsp;where i* = argmax<sub>i</sub> p<sub>i</sub><br>
+Let j* = g(ℓ<sub>i*</sub>). Then:<br><br>
+γ ≥ Σ<sub>i ∈ group j*</sub> p<sub>i</sub> ≥ p<sub>i*</sub> = s
+<span class="where">The first inequality because γ is a max over groups and j* is one of
+them; the second because every p<sub>i</sub> ≥ 0. Equality holds iff the top label is
+alone in its group.</span>
+</div>
+
+<p>And the chain extends upward:</p>
+
+<div class="math">
+s ≤ γ ≤ Σ<sub>i</sub> p<sub>i</sub> = 1 − P(<code>__OTHER__</code> | x)
+</div>
+
+<h4>Worked example</h4>
+<p>K = 5 labels over 2 groups. Posterior over the non-OTHER columns:</p>
+
+<div class="scroll"><table>
+<thead><tr><th>label</th><th>group</th><th class="n">p<sub>i</sub></th></tr></thead>
+<tbody>
+<tr><td>Sedum acre</td><td>Sedum</td><td class="n">0.31</td></tr>
+<tr class="hi"><td>Sedum album</td><td>Sedum</td><td class="n">0.34</td></tr>
+<tr><td>Sedum dasyphyllum</td><td>Sedum</td><td class="n">0.22</td></tr>
+<tr><td>Bellis perennis</td><td>Bellis</td><td class="n">0.08</td></tr>
+<tr><td>Bellis sylvestris</td><td>Bellis</td><td class="n">0.05</td></tr>
+</tbody></table></div>
+
+<p><span class="num">s = 0.34</span> (Sedum album).
+<span class="num">γ = max(0.31+0.34+0.22, 0.08+0.05) = 0.87</span> (Sedum).
+With <span class="num">t_group = 0.70, t_label = 0.55</span>: γ = 0.87 ≥ 0.70 so it does
+not decline; s = 0.34 &lt; 0.55 so it answers <b class="b">"Sedum"</b>.</p>
+
+<p>This is the correct behaviour and also the seed of the problem. The answer is true, it
+is delivered with high confidence, it scores as a <em>correct</em> answer in coverage
+and precision — and if four of the user's five labels are <em>Sedum</em>, it has told
+them almost nothing.</p>
+</section>
+
+<section id="s5">
+<div class="sh"><p class="eyebrow">05</p><h2>Declared utilities</h2></div>
+
+<p>Thresholds are fitted by maximising expected utility. The payoffs are written down
+<em>before</em> any fitting, in source, and changing them is a deliberate act.</p>
+
+<pre><code>UTILITY = {"label_correct": 1.0, "group_correct": 0.5, "wrong": -4.0,
+           "decline_ood": 1.0, "decline_in_catalog": 0.0}</code></pre>
+
+<div class="math">
+U(decision, truth) =<br>
+&nbsp;&nbsp;+1.0&nbsp;&nbsp;LABEL and correct<br>
+&nbsp;&nbsp;+0.5&nbsp;&nbsp;GROUP and group correct<br>
+&nbsp;&nbsp;−4.0&nbsp;&nbsp;any answer that is wrong<br>
+&nbsp;&nbsp;+1.0&nbsp;&nbsp;DECLINE on something outside the label set&nbsp;&nbsp;<span class="muted">(the right call)</span><br>
+&nbsp;&nbsp;&nbsp;0.0&nbsp;&nbsp;DECLINE on something inside it&nbsp;&nbsp;<span class="muted">(a miss, not an error)</span>
+</div>
+
+<p>The implementation is branchless so the grid search can call it tens of thousands of
+times:</p>
+
+<pre><code>is_dec, is_sp = levels == DECLINE, levels == LABEL
+is_gn = ~is_dec & ~is_sp
+return (
+    is_dec * np.where(in_catalog, w["decline_in_catalog"], w["decline_ood"])
+    + is_sp * np.where(label_ok,  w["label_correct"], w["wrong"])
+    + is_gn * np.where(group_ok,  w["group_correct"], w["wrong"])
+)</code></pre>
+
+<div class="note">
+<span class="key">Why declare rather than optimise a metric</span>
+<p>An "is the answer useful" objective is degenerate here. Group accuracy is always
+higher than label accuracy — 0.974 vs 0.837 on the 490-class catalogue — so any metric
+rewarding correctness alone is maximised by <em>always answering group</em>, which
+deletes the product while scoring beautifully.</p>
+<p>The <code>wrong: −4.0</code> figure was raised from −2.0 once thresholds began being
+fitted at a stated prevalence. The frontier it moves along, on held-out data:
+μ=2 gives precision 0.944 at coverage 0.797; <strong>μ=4 gives 0.965 at 0.747</strong>;
+μ=32 gives 0.991 at 0.645 but label-level answering collapses to 0.126. Reaching 99%
+precision costs essentially all label-level answering, which is not a better product.</p>
+</div>
+
+<div class="note warn">
+<span class="key">Known limitation</span>
+<p><code>group_correct</code> is a flat 0.5 regardless of how much the group narrows the
+field. On a label set where every member shares one group, a group answer conveys zero
+information and still scores 0.5. This is the direct cause of the pathology in §9. A
+group-informativeness term would fix it — and by this project's own conventions it must
+be declared before being fitted, so it remains open rather than quietly patched.</p>
+</div>
+</section>
+
+<section id="s6">
+<div class="sh"><p class="eyebrow">06</p><h2>Prevalence anchoring</h2></div>
+
+<p>The operating point depends on how often a user photographs something outside their
+label set. That rate is unknown, and it is the single largest lever on every reported
+number. Leaving it to the evaluation set's incidental composition means the sampling
+accident chooses the product.</p>
+
+<div class="math">
+Given buckets b<sub>i</sub> ∈ {in_catalog, near_ood, distant_ood} and assumed
+out-of-set rate p:<br><br>
+w<sub>i</sub> = (1 − p) / n<sub>in</sub>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if b<sub>i</sub> = in_catalog<br>
+w<sub>i</sub> = p · (m<sub>b</sub> / Σm) / n<sub>b</sub>&nbsp;&nbsp;&nbsp;if b<sub>i</sub> = b, an OOD bucket<br><br>
+then rescaled: w ← w · N / Σw
+<span class="where">m<sub>b</sub> is the assumed share of OOD traffic in bucket b
+(near/distant = 0.32/0.68); n<sub>b</sub> is how many rows the evaluation set happens to
+contain. Dividing by n<sub>b</sub> is what removes the sampling accident.</span>
+</div>
+
+<div class="note retract">
+<span class="key">Why this exists — a real incident</span>
+<p>Thresholds were once fitted on whatever mix the evaluation set contained, then
+reported under a different assumption. Expanding the in-catalogue bucket from 750 to
+2,283 observations — to settle an unrelated question — moved the set from 59.5%
+out-of-catalogue to 44.8%. That alone moved <span class="num">t_label</span> from
+<span class="num">0.897</span> to <span class="num">0.552</span> and took label-level
+answers from 9% of in-catalogue observations to 67%.</p>
+<p><strong>Adding data, changing nothing else, produced a completely different
+product.</strong> Both fitting and reporting are now anchored to a stated
+<span class="num">p</span>.</p>
+</div>
+</section>
+
+<section id="s7">
+<div class="sh"><p class="eyebrow">07</p><h2>Fitting the thresholds</h2></div>
+
+<p>Exhaustive grid search over the quantiles of the observed score distributions.
+Non-differentiable objective, two parameters, so this is exact rather than approximate.</p>
+
+<div class="math">
+(t<sub>group</sub>*, t<sub>label</sub>*) = argmax<sub>(t<sub>g</sub>, t<sub>ℓ</sub>)</sub> Σ<sub>i</sub> ŵ<sub>i</sub> · U(decide(s<sub>i</sub>, γ<sub>i</sub>, t<sub>g</sub>, t<sub>ℓ</sub>), truth<sub>i</sub>)
+<span class="where">ŵ = w / Σw, the normalised deployment weights. Grid points are the
+60 quantiles of γ and of s over the calibration split — so the search adapts to the
+score distribution rather than assuming it spans [0,1].</span>
+</div>
+
+<pre><code>g_grid = np.quantile(group_conf, np.linspace(0, 1, n_grid))   # n_grid = 60
+s_grid = np.quantile(label_conf, np.linspace(0, 1, n_grid))
+best, best_u = (0.0, 0.0), -np.inf
+for tg in g_grid:
+    for ts in s_grid:
+        u = float(np.dot(utility(decide(label_conf, group_conf, tg, ts),
+                                 label_ok, group_ok, in_catalog, weights), sw))
+        if u &gt; best_u:
+            best, best_u = (float(tg), float(ts)), u</code></pre>
+
+<p>3,600 evaluations, each vectorised over the whole calibration split. Fitted on the
+calibration half only; the test half is never touched by threshold selection.</p>
+
+<h4>A degenerate case worth recognising</h4>
+<p>On a group-crowded label set the fitted thresholds become <em>invariant to
+p</em>. Measured on an all-<em>Sedum</em>/<em>Trifolium</em> set:
+<span class="num">t_group = 0.1173</span>, <span class="num">t_label = 0.9065</span>,
+identical at p = 0.5, 0.2 and 0.1, while coverage moved 0.686 → 0.933.</p>
+
+<p>This is not a bug and not a grid artifact — <span class="num">t_label = 0.9065</span>
+is an interior optimum against a maximum observed <span class="num">s</span> of 0.9903,
+and on well-separated sets the same fit <em>does</em> respond to p
+(<span class="num">t_group</span> 0.8513 → 0.3973). The mechanism: when the near-OOD
+bucket consists of species from groups the user chose, a group answer is correct for
+in-catalogue and near-OOD rows <em>alike</em>. Group answering therefore earns utility
+at any prevalence, <span class="num">t_group</span> sits near the floor, and declining
+is never worth it. Coverage still moves with p because the bucket <em>weights</em> move,
+not the thresholds.</p>
+</section>
+
+<section id="s8">
+<div class="sh"><p class="eyebrow">08</p><h2>Evaluation discipline</h2></div>
+
+<h3>Cluster, never row</h3>
+<p>Several photographs commonly depict the same subject. Treating them as independent
+inflates effective sample size and produces intervals that do not replicate — which
+happened twice in this project's history before the rule was adopted.</p>
+
+<pre><code>def make_splits(df, seed=0):
+    for bucket, group in df.groupby("bucket"):
+        key = SPLIT_CLUSTER.get(bucket, "label")   # near_ood splits on GROUP, not label
+        clusters = np.array(sorted(group[key].unique()))
+        rng.shuffle(clusters)
+        calib = set(clusters[: len(clusters) // 2])</code></pre>
+
+<p>The per-bucket key matters. Splitting near-OOD by label would put two species of the
+same group on opposite sides, and the decision being fitted there <em>is</em> the group
+decision — so near-OOD splits on group.</p>
+
+<div class="note warn">
+<span class="key">A bug this caused, and how it surfaced</span>
+<p>Background rows were once labelled <code>__OTHER__</code> in the clustering column as
+well as the label column. <code>make_splits</code> therefore saw a single cluster, and
+<code>clusters[:1//2]</code> is empty — so <strong>all 1,554 background rows went to
+test and none to calibration</strong>. Thresholds were being fitted with no distant
+negatives at all.</p>
+<p>Fixing it moved calibration from 562 rows to 1,402 and the operating point a long way:
+coverage <del>0.753</del> → <b class="g">0.618</b>, precision <del>0.961</del> →
+<b class="g">0.985</b>. The clustering identity now carries the real label for every row
+including background, while <code>truth</code> keeps <code>__OTHER__</code> so
+correctness flags stay false.</p>
+</div>
+
+<h3>Bootstrap the ratio, not the mean</h3>
+<p>Coverage and precision are prevalence-<em>weighted</em> across buckets. Bootstrapping
+the unweighted mean of the same rows estimates a different quantity entirely.</p>
+
+<div class="math">
+θ̂ = Σ<sub>i</sub> ν<sub>i</sub> / Σ<sub>i</sub> δ<sub>i</sub>
+<span class="where">For precision: ν = w·1[answered]·1[correct], δ = w·1[answered].
+For coverage: ν = w·1[answered], δ = w. Resample <em>clusters</em> with replacement,
+recompute the ratio within each resample, take the 2.5/97.5 percentiles.</span>
+</div>
+
+<div class="note retract">
+<span class="key">Caught by construction</span>
+<p>The first implementation bootstrapped <code>np.mean(correct[answered])</code> — an
+unweighted mean — and produced a 95% interval of <strong>22.3–77.1% around a point
+estimate of 96.1%</strong>. Unweighted, precision is dominated by the OOD rows that
+<code>deployment_weights</code> exists to down-weight. The defect was visible only
+because the interval was printed beside the number it contradicted.</p>
+</div>
+</section>
+
+<section id="s9">
+<div class="sh"><p class="eyebrow">09</p><h2>The coarse-answer trap</h2></div>
+
+<p>This is the central result. Two 14-label sets, drawn from the same catalogue, encoded
+by the same model, built and measured identically. One is crowded — 8 <em>Sedum</em> and
+6 <em>Trifolium</em>, two groups. The other spans 14 distinct groups.</p>
+
+<div class="scroll"><table>
+<thead><tr><th>metric</th><th class="n">crowded (2 groups)</th><th class="n">separated (14 groups)</th><th>reading</th></tr></thead>
+<tbody>
+<tr><td>Coverage</td><td class="n"><b class="b">0.806</b></td><td class="n">0.618</td><td class="muted">crowded looks better</td></tr>
+<tr><td>Precision</td><td class="n">0.978</td><td class="n">0.985</td><td class="muted">indistinguishable</td></tr>
+<tr class="good"><td><strong>Label-level share</strong></td><td class="n"><b class="w">0.476</b></td><td class="n"><b class="g">0.761</b></td><td>the truth</td></tr>
+<tr><td>Closed-set top-1</td><td class="n">0.817</td><td class="n">0.970</td><td class="muted">15pp worse when it does name</td></tr>
+</tbody></table></div>
+
+<p><strong>The crowded set answers a third more queries at the same precision and is the
+worse model in every way its owner cares about.</strong> It buys the coverage with group
+answers that narrow nothing — "it is a <em>Sedum</em>" when eight of fourteen labels are
+<em>Sedum</em> — and it is 15pp less accurate when it does commit to a label.</p>
+
+<h3>Why coverage inverts</h3>
+<p>Recall from §4 that <span class="num">γ ≥ s</span>, with equality only when the top
+label is alone in its group. Crowding does two things at once:</p>
+
+<ol>
+<li><strong>γ rises.</strong> Probability mass that was split across siblings sums back
+together at group level, so <span class="num">γ</span> climbs toward 1 and the decline
+test <span class="num">γ &lt; t_group</span> almost never fires.</li>
+<li><strong>s falls.</strong> That same splitting depresses the top label posterior, so
+<span class="num">s &lt; t_label</span> fires often and the answer retreats to group.</li>
+</ol>
+
+<p>Coverage counts <em>any</em> non-decline, so it rises. Precision counts group answers
+as correct, so it holds. Only the label-level share — the fraction of in-set
+observations answered at the fine rank — records what happened.</p>
+
+<h3>It is not a plant finding</h3>
+<p>Prediction registered in advance, then tested on birds through the same encoder:
+<em>Larus</em> (7 gulls) + <em>Calidris</em> (6 sandpipers) against 13 distinct genera.</p>
+
+<div class="scroll"><table>
+<thead><tr><th>arm</th><th class="n">groups</th><th class="n">coverage</th><th class="n">precision</th><th class="n">label-level</th><th class="n">top-1</th></tr></thead>
+<tbody>
+<tr><td>Birds, separated</td><td class="n">13</td><td class="n">0.766</td><td class="n">0.991</td><td class="n"><b class="g">0.958</b></td><td class="n">0.970</td></tr>
+<tr><td>Birds, crowded</td><td class="n">2</td><td class="n"><b class="b">0.784</b></td><td class="n">0.989</td><td class="n"><b class="w">0.718</b></td><td class="n">0.899</td></tr>
+<tr><td class="muted">Plants, separated</td><td class="n muted">14</td><td class="n muted">0.618</td><td class="n muted">0.985</td><td class="n muted">0.761</td><td class="n muted">0.970</td></tr>
+<tr><td class="muted">Plants, crowded</td><td class="n muted">2</td><td class="n muted">0.806</td><td class="n muted">0.978</td><td class="n muted">0.476</td><td class="n muted">0.817</td></tr>
+</tbody></table></div>
+
+<p>All three predictions held: higher coverage, comparable precision, and a 24pp collapse
+in label-level share against 28.5pp on plants. The coverage rise is much smaller on birds
+(+1.8pp vs +18.8pp) so the trap is not identical in shape — but the load-bearing part is.
+<em>Larus</em> and <em>Calidris</em> are the groups birders themselves consider hardest,
+so this is a fair analogue rather than a contrived one.</p>
+
+<div class="note">
+<span class="key">What this licenses</span>
+<p>Stating the trap as a property of <strong>hierarchical label sets</strong>, not of
+plant taxonomy — which is what justifies shipping the structural warnings into any
+domain. It does <em>not</em> license the numbers, which were measured on one domain
+through one encoder. In the tool, projection is disabled unless a measured profile
+exists for the requested domain; there is no fallback to the plant grid.</p>
+</div>
+</section>
+
+<section id="s10">
+<div class="sh"><p class="eyebrow">10</p><h2>Safety: per-pair vs. union</h2></div>
+
+<p>When being wrong is expensive, the natural instinct is to enumerate the dangerous
+confusions and measure each. That is necessary and <em>not sufficient</em>, and the gap
+between the two is large enough to pass a model that should fail.</p>
+
+<p>Test: 27 Oregon species, 6,023 images over 4,057 observations, split by observation.
+The dangerous pairs were named in a pre-registration written before any image was
+fetched. BioCLIP-2, at full coverage:</p>
+
+<div class="scroll"><table>
+<thead><tr><th>truth</th><th>mistaken for</th><th class="n">rate</th><th class="n">@75% cov</th></tr></thead>
+<tbody>
+<tr><td>Conium maculatum</td><td>Daucus carota</td><td class="n">0.008</td><td class="n">0.000</td></tr>
+<tr><td>Conium maculatum</td><td>Lomatium nudicaule</td><td class="n">0.000</td><td class="n">0.000</td></tr>
+<tr><td>Conium maculatum</td><td>Anthriscus caucalis</td><td class="n">0.025</td><td class="n">0.008</td></tr>
+<tr><td>Cicuta douglasii</td><td>Heracleum maximum</td><td class="n">0.000</td><td class="n">0.000</td></tr>
+<tr><td>Sambucus racemosa</td><td>Sambucus cerulea</td><td class="n">0.037</td><td class="n">0.024</td></tr>
+</tbody></table></div>
+
+<p>Every cell looks acceptable. <strong>No single pre-registered pair exceeds 2.5%.</strong>
+Now the union — how often is a lethal plant given the name of <em>anything</em> a person
+would eat?</p>
+
+<div class="math">
+fatal(ℓ) = P( answered ∧ name(answer) ∉ H | truth = ℓ ),&nbsp;&nbsp;ℓ ∈ H
+<span class="where">H is the declared hazard set. An answer counts if it names a label
+outside H, <em>or</em> a group containing no member of H. Being named as another hazard
+is wrong but not dangerous — the user still does not act on it — and is counted
+separately.</span>
+</div>
+
+<div class="scroll"><table>
+<thead><tr><th>Conium maculatum named as anything harmless</th><th class="n">100% cov</th><th class="n">75%</th><th class="n">50%</th></tr></thead>
+<tbody>
+<tr class="hi"><td>BioCLIP-2 (152 MB)</td><td class="n"><b class="w">0.067</b> [0.017, 0.128]</td><td class="n">0.008 [0.000, 0.026]</td><td class="n">0.000</td></tr>
+<tr><td>PlantCLEF2024 (43 MB)</td><td class="n">0.042</td><td class="n"><b class="g">0.000</b></td><td class="n">0.000</td></tr>
+<tr><td>MobileCLIP2-S2 (17.9 MB)</td><td class="n"><b class="w">0.283</b></td><td class="n">0.167</td><td class="n">0.050</td></tr>
+</tbody></table></div>
+
+<p><strong>6.7% against a 1% bar declared in advance, while no individual pair exceeded
+2.5%.</strong> The errors scatter across many different harmless-looking labels, each
+individually small. A per-pair report passes a model a union report fails.</p>
+
+<p>The pre-registration said <em>never average across pairs</em> — averaging hides the
+worst case — and that stands. But a union is not an average, and it was missing. Both are
+required.</p>
+
+<p>Abstention resolves it: at 75% coverage the rate falls to 0.8% and at 50% it is zero.
+Refusing a quarter of hemlock photographs is correct product behaviour.</p>
+
+<div class="note warn">
+<span class="key">Group answers count as dangerous</span>
+<p>A first implementation counted only label-level answers. That is wrong: "it is a
+<em>Lomatium</em>" for poison hemlock is precisely the error that kills foragers, because
+<em>Lomatium</em> roots are dug and eaten. A coarse answer naming a group containing
+nothing hazardous is as actionable as a wrong label. Only declining — or answering with
+the hazard's own group — is safe.</p>
+</div>
+
+<p>In the tool this is a <em>gate</em>, not a statistic. Labels the user declares
+consequential are checked against a bar fixed in advance, and the card refuses to
+certify a model that exceeds it.</p>
+</section>
+
+<section id="s11">
+<div class="sh"><p class="eyebrow">11</p><h2>The size/accuracy frontier</h2></div>
+
+<p>How much does a smaller encoder cost as the label set narrows? 530-species catalogue,
+frozen encoders, 15 draws per point, random (mostly cross-group) subsets.</p>
+
+<div class="scroll"><table>
+<thead><tr><th class="n">K</th><th class="n">BioCLIP-2</th><th class="n">S2 (17.9 MB)</th><th class="n">gap</th><th class="n">S0 (5.7 MB)</th><th class="n">gap</th></tr></thead>
+<tbody>
+<tr class="good"><td class="n">10</td><td class="n">0.9888</td><td class="n">0.9730</td><td class="n"><b class="g">1.6pp</b></td><td class="n">0.9546</td><td class="n">3.4pp</td></tr>
+<tr><td class="n">20</td><td class="n">0.9790</td><td class="n">0.9493</td><td class="n">3.0pp</td><td class="n">0.9290</td><td class="n">5.0pp</td></tr>
+<tr><td class="n">50</td><td class="n">0.9386</td><td class="n">0.8990</td><td class="n">4.0pp</td><td class="n">0.8666</td><td class="n">7.2pp</td></tr>
+</tbody></table></div>
+
+<p>The penalty shrinks monotonically as the catalogue narrows. The obvious confound was
+checked: the reject class draws on a fixed pool, so the label:background ratio shifts ~5×
+across this range. Halving background at K=10 moved the gaps 1.6→1.2pp and 3.4→3.5pp —
+the trend is encoder capacity, not fit composition.</p>
+
+<div class="note retract">
+<span class="key">Retracted in place</span>
+<p>These numbers are measured on a curated, plant-centred corpus. Repeating the K=20 cell
+on <em>real iNaturalist field photographs</em>: BioCLIP-2 0.9790 → <b class="g">0.9769</b>
+(−0.2pp), MobileCLIP2-S2 0.9493 → <b class="w">0.8557</b> (−9.4pp). The gap
+<strong>quadruples</strong>, from 3.0pp to 12.1pp.</p>
+<p>The frontier is an upper bound <em>for the small encoders specifically</em>. It is not
+wrong — it is measured on the data it names — but it does not survive a change of image
+source, and a user's photographs resemble field photographs.</p>
+</div>
+
+<h3>Encoders, and why byte order is not speed order</h3>
+
+<div class="scroll"><table>
+<thead><tr><th>encoder</th><th class="n">params</th><th class="n">int4</th><th class="n">input</th><th class="n">ms/img</th><th class="n">20 common Oregon</th><th class="n">hemlock fatal @75%</th></tr></thead>
+<tbody>
+<tr><td>MobileCLIP2-S0</td><td class="n">11.4 M</td><td class="n">5.7 MB</td><td class="n">256</td><td class="n">—</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>MobileCLIP2-S2</td><td class="n">35.8 M</td><td class="n">17.9 MB</td><td class="n">256</td><td class="n">5.2</td><td class="n">0.8557</td><td class="n"><b class="w">0.167</b></td></tr>
+<tr class="good"><td>PlantCLEF2024</td><td class="n">86.6 M</td><td class="n"><b class="g">43.3 MB</b></td><td class="n">518</td><td class="n"><b class="w">38.6</b></td><td class="n">0.9621</td><td class="n"><b class="g">0.000</b></td></tr>
+<tr class="hi"><td>BioCLIP-2</td><td class="n">304.0 M</td><td class="n">152 MB</td><td class="n">224</td><td class="n"><b class="g">20.4</b></td><td class="n"><b class="g">0.9769</b></td><td class="n">0.008</td></tr>
+</tbody></table></div>
+
+<p>PlantCLEF2024 has a third of BioCLIP-2's parameters and <em>nearly twice</em> its
+latency, because it runs at 518px — 5.3× the pixels. So a byte budget and a latency
+budget rank these differently, and the tool's <code>choose()</code> ranks storage only
+and says so.</p>
+
+<div class="note">
+<span class="key">The middle ground is not a distilled model</span>
+<p>Distilling BioCLIP-2 into a ViT-B — exactly this size class — was run on an A100 over
+48k transfer images, reaching held-out cosine 0.956 to the teacher. It <em>lost</em>
+0.7pp of group accuracy against the off-the-shelf model it was meant to beat, recovering
+~10% of a 19pp coverage gap. Compressing the large encoder does not work; choosing a
+different one does.</p>
+<p>This is also one of three data points behind a standing rule in this project:
+<strong>cosine similarity to a teacher does not predict downstream accuracy.</strong> It
+bounds how much <em>could</em> have changed and says nothing about whether what changed
+mattered.</p>
+</div>
+</section>
+
+<section id="s12">
+<div class="sh"><p class="eyebrow">12</p><h2>Measuring contamination</h2></div>
+
+<p>BioCLIP-2 trains on iNaturalist via GBIF, and the evaluation images are iNaturalist.
+Every number was therefore hedged as an upper bound. That hedge is now measured.</p>
+
+<p><strong>Design.</strong> BioCLIP-2 was released June 2025, so its GBIF snapshot
+predates that. Observations <em>uploaded</em> after mid-2025 are image-level novel to it
+while being the same platform, photographers and species. Two disjoint test sets, same
+training corpus, 20 common Oregon plants:</p>
+
+<div class="scroll"><table>
+<thead><tr><th>encoder</th><th class="n">pre-cutoff (seen)</th><th class="n">post-cutoff (unseen)</th><th class="n">gap</th><th class="n">95% CI</th></tr></thead>
+<tbody>
+<tr class="good"><td>BioCLIP-2</td><td class="n">0.9906</td><td class="n">0.9879</td><td class="n">−0.0027</td><td class="n">[−0.0088, +0.0035]</td></tr>
+<tr class="good"><td>PlantCLEF2024</td><td class="n">0.9842</td><td class="n">0.9793</td><td class="n">−0.0049</td><td class="n">[−0.0136, +0.0030]</td></tr>
+<tr><td>MobileCLIP2-S2</td><td class="n">0.9241</td><td class="n">0.9006</td><td class="n"><b class="w">−0.0234</b></td><td class="n">[−0.0414, −0.0057]</td></tr>
+</tbody></table></div>
+
+<p>The large encoders are <strong>indistinguishable from zero</strong>. Whatever
+memorisation advantage exists is bounded under one percentage point.</p>
+
+<div class="note warn">
+<span class="key">The control is the finding</span>
+<p>A first attempt compared post-cutoff against the existing training corpus and found
+post-cutoff scoring <em>higher</em> for all three encoders — which would have supported a
+much stronger claim. That was a sampling artifact: the corpus had been drawn with
+<code>order_by=votes</code>, and heavily-faved observations are not a random sample.
+Re-drawing the pre-cutoff side identically (<code>order_by=created_at desc</code>)
+reversed the sign and shrank the effect to noise.</p>
+</div>
+
+<p><strong>The drop belongs to the small encoder, and it is not memorisation.</strong>
+MobileCLIP2-S2 loses 2.3pp with a CI excluding zero — the largest drop, from the encoder
+<em>least</em> likely to have trained on iNaturalist. It is sensitivity to drift, and it
+is the same pattern as the image-source change in §11 where S2 lost 9.4pp and BioCLIP-2
+lost 0.2pp. Two independent measurements agree: <em>a small encoder's accuracy is not
+merely lower, it is less durable.</em></p>
+</section>
+
+<section id="s13">
+<div class="sh"><p class="eyebrow">13</p><h2>Failure modes and open questions</h2></div>
+
+<h3>Known failure modes</h3>
+<ul>
+<li><strong>Narrowing does not fix a confusable set.</strong> Going 50 → 10 labels buys
+~4pp on a group-dense set (0.710 → 0.752) against 0.939 → 0.989 on a separated one. The
+tool warns; it cannot solve.</li>
+<li><strong>Near-OOD is the weakest bucket.</strong> Siblings of chosen labels that were
+left <em>outside</em> the set have no correct answer available. On one build, only 16.9%
+were answered and 59.6% of those were correct — against 98.1% on in-set rows.</li>
+<li><strong>Group answers can be vacuous.</strong> §9. The flat 0.5 utility is the
+proximate cause.</li>
+<li><strong>The reference pool is a floor.</strong> Sibling warnings check against a
+bundled 499-binomial list. A group whose relatives that list never included looks safer
+than it is — and at a pool of thousands the check <em>inverts</em>, since nearly every
+label would have outside relatives and "shares a group" stops carrying information.
+Ranking by embedding distance is the fix.</li>
+</ul>
+
+<h3>Open questions</h3>
+<ol>
+<li><strong>Domain shift.</strong> The only untested axis. Contamination is measured and
+small; the trap generalises across kingdoms; but every number in both repos comes from
+iNaturalist photographs. Nobody has pointed a different camera at a plant and asked.</li>
+<li><strong>A group-informativeness utility term.</strong> Would fix the vacuous-group
+degeneracy. Must be declared before being fitted.</li>
+<li><strong>Core ML export of PlantCLEF2024.</strong> The 38.6 ms is MPS. 518px is a very
+different graph on the Neural Engine, and int4 per-grouped-channel is known to be
+<em>silently wrong</em> on the Metal GPU backend in this stack — returning a plausible
+unit-norm embedding while being incorrect. The deployment claim for the 43 MB option is
+unverified on-device.</li>
+<li><strong>Encoder generality.</strong> The bird replication used the same encoder. The
+trap is established across label hierarchy and visual domain, not across encoders or
+data sources.</li>
+</ol>
+</section>
+
+<footer>
+<p><strong>Provenance.</strong> Every formula transcribed from
+<a href="https://github.com/semajyllek/narrowcast">narrowcast</a>; every measurement
+reproducible from <a href="https://github.com/semajyllek/plantid">plantid</a> — see
+<code>EMBEDDED_FINDINGS.md</code>, <code>OREGON_SAFETY_FINDINGS.md</code>,
+<code>BIRDS_FINDINGS.md</code>, <code>CONTAMINATION_FINDINGS.md</code> and the two
+pre-registrations.</p>
+<p>Two claims in this document are retracted versions of earlier ones, marked in place
+rather than deleted: the frontier's transfer across image sources (§11) and the direction
+of the contamination confound (§12).</p>
+<p>Nothing here is verification. Do not eat anything on the basis of a model built this
+way.</p>
+</footer>
+
+</div>
