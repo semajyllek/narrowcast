@@ -59,7 +59,8 @@ class Dataset:
     truth: np.ndarray
     bucket: np.ndarray
     counts: dict
-    cluster: np.ndarray          # real labels name per eval row, background included
+    cluster: np.ndarray          # real label per eval row, background included
+    group: np.ndarray | None = None   # caller-supplied coarse rank, per eval row
 
 
 def _l2(X):
@@ -92,6 +93,7 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
     Xtr, ytr = [X[tr]], [rows.label[tr]]
     ev, truth, cluster, bucket = [X[~tr]], [rows.label[~tr]], [rows.cluster[~tr]], \
         ["in_catalog"] * int((~tr).sum())
+    group = [rows.group[~tr]]
     counts = {"in_catalog": int((~tr).sum()), "near_ood": 0, "distant_ood": 0,
               "train": int(tr.sum())}
     notes = list(rows.notes)
@@ -104,6 +106,7 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
         far = cut[n:]
         ev.append(B[far]); truth.append(np.full(len(far), OTHER))
         cluster.append(background.cluster[far])
+        group.append(background.group[far])
         bucket += ["distant_ood"] * len(far)
         counts["distant_ood"] = len(far)
         counts["train"] += n
@@ -114,7 +117,7 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
     counts["has_clusters"] = bool(rows.has_clusters)
     return Dataset(np.vstack(Xtr), np.concatenate(ytr), pd.DataFrame(),
                    np.vstack(ev), np.concatenate(truth), np.array(bucket), counts,
-                   np.concatenate(cluster))
+                   np.concatenate(cluster), np.concatenate(group))
 
 
 def fit_head(ds: Dataset, C: float = 10.0) -> LogisticRegression:
@@ -127,13 +130,23 @@ def score_frame(clf, ds: Dataset) -> pd.DataFrame:
     """Per-observation cascade inputs and outcomes."""
     classes = np.array(clf.classes_)
     mask = classes != OTHER
-    gmat, ug = group_matrix(classes, mask)
+    gmap = (dict(zip(ds.truth.tolist(), ds.group.tolist()))
+            if ds.group is not None else None)
+    gmat, ug = group_matrix(classes, mask, gmap)
 
     cata = clf.predict_proba(ds.X_eval)[:, mask]
     gscore = cata @ gmat.T
     sp_pred = classes[mask][cata.argmax(1)]
     gp_pred = ug[gscore.argmax(1)]
-    true_group = np.array([group_of(t) if t != OTHER else OTHER for t in ds.truth])
+    # The caller's `group` column wins. Deriving it from the label with the
+    # default whitespace rule silently made every label its own group for any
+    # domain that does not use Latin binomials -- on 20 Newsgroups it produced
+    # group accuracy exactly equal to label accuracy, i.e. a group rank carrying
+    # no information, and the cascade correctly refused to ever use it.
+    supplied = ds.group if ds.group is not None else None
+    true_group = np.array([
+        (OTHER if t == OTHER else (supplied[i] if supplied is not None else group_of(t)))
+        for i, t in enumerate(ds.truth)])
 
     return pd.DataFrame({
         "label_conf": cata.max(1),
@@ -149,7 +162,8 @@ def score_frame(clf, ds: Dataset) -> pd.DataFrame:
         # both key on these, and both need background rows to carry their real
         # labels rather than collapsing into a single __OTHER__ cluster.
         "label": ds.cluster,
-        "group": np.array([group_of(c) for c in ds.cluster]),
+        "group": (ds.group if ds.group is not None
+                  else np.array([group_of(c) for c in ds.cluster])),
     })
 
 

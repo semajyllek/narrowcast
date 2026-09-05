@@ -33,14 +33,23 @@ OOD_MIX_GLOBAL = {"near_ood": 0.32, "distant_ood": 0.68}
 UTILITY = {"label_correct": 1.0, "group_correct": 0.5, "wrong": -4.0,
            "decline_ood": 1.0, "decline_in_catalog": 0.0}
 
-def group_matrix(classes, mask):
+def group_matrix(classes, mask, group_map=None):
     """(n_groups, n_labels) indicator G, and the group name per row.
 
     G[j, i] = 1 iff label i belongs to group j. Right-multiplying the per-label
     posterior by G.T sums probability mass within each group, which is what makes
     the cascade's scores nested (see `decide`).
+
+    `group_map` is a label -> group dict supplied by the caller. Without it the
+    group is the label's first whitespace token, which is a Latin-binomial
+    convention: on a domain like `comp.sys.mac.hardware` it makes every label its
+    own group, the group rank carries no information, and the cascade correctly
+    but uselessly refuses to ever use it.
     """
-    groups = np.array([c.split()[0] for c in classes[mask]])
+    if group_map:
+        groups = np.array([group_map.get(c, c.split()[0]) for c in classes[mask]])
+    else:
+        groups = np.array([c.split()[0] for c in classes[mask]])
     ug = np.unique(groups)
     return np.stack([(groups == g).astype(float) for g in ug]), ug
 

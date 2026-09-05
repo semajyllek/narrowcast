@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from narrowcast import build, card, encoders, labels, plan, projection, sources
+from narrowcast import build, cascade, card, encoders, labels, plan, projection, sources
 
 
 # ---- labels list parsing -------------------------------------------------
@@ -517,3 +517,44 @@ def test_a_failed_candidate_does_not_end_the_sweep_or_get_chosen():
 def test_render_shows_the_floor_and_marks_what_clears_it():
     out = SW.render([_r("a", 20.0, 0.95), _r("b", 10.0, 0.80)], "label_share", 0.90)
     assert "floor: label_share >= 0.9000" in out and "ok" in out
+
+
+# ---- the supplied group column must actually reach the cascade -------------
+
+def _rows(labels, groups, dim=8, seed=0):
+    rng = np.random.default_rng(seed)
+    X = np.vstack([rng.normal(hash(g) % 7, 0.3, (1, dim)) for g in groups]).astype("float32")
+    return sources._finish(labels, descriptor=X, group=groups,
+                           cluster=[f"c{i}" for i in range(len(labels))])
+
+
+def test_supplied_group_reaches_the_frame_and_is_not_recomputed():
+    """`sources` read the group column, `Rows` carried it, and `score_frame` used
+    to discard it and re-derive from whitespace — which made every dotted label
+    its own group and silently disabled the group rank for non-binomial domains."""
+    labels = ["comp.graphics", "comp.windows.x", "rec.autos", "rec.motorcycles"]
+    groups = ["comp", "comp", "rec", "rec"]
+    ds = build.load_rows(_rows(labels * 6, groups * 6), "unused")
+    clf = build.fit_head(ds)
+    frame = build.score_frame(clf, ds)
+    assert set(frame["group"]) <= {"comp", "rec"}, "group column was re-derived"
+    assert "comp.graphics" not in set(frame["group"])
+
+
+def test_group_matrix_honours_a_supplied_mapping():
+    classes = np.array(["comp.graphics", "comp.windows.x", "rec.autos"])
+    mask = np.ones(3, bool)
+    _, ug = cascade.group_matrix(classes, mask)
+    assert len(ug) == 3                      # default rule: every label its own group
+    _, ug2 = cascade.group_matrix(classes, mask,
+                                  {"comp.graphics": "comp", "comp.windows.x": "comp",
+                                   "rec.autos": "rec"})
+    assert sorted(ug2) == ["comp", "rec"]
+
+
+def test_binomial_labels_are_unaffected_by_the_fix():
+    """Every previously committed result used whitespace-separated binomials, where
+    the default rule was already correct."""
+    from narrowcast.labels import group_of
+    assert group_of("Sedum acre") == "Sedum"
+    assert group_of("Larus occidentalis") == "Larus"
