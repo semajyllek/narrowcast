@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "narrowcast"
+version = "0.1.0"
+description = "A small classifier over a narrow label set, and the truth about how it will fail."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.3", "pyarrow>=14"]
+
+[project.optional-dependencies]
+# Only needed to turn images into vectors. `--embeddings`, `plan` and `card`
+# all work without torch installed.
+encode = ["torch>=2.2", "open_clip_torch>=2.24", "timm>=1.0", "pillow>=10",
+          "safetensors>=0.4", "huggingface_hub>=0.23"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+narrowcast = "narrowcast.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["narrowcast*"]
+
+[tool.setuptools.package-data]
+narrowcast = ["profiles/*.json"]
