@@ -52,6 +52,11 @@ th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--rule);whit
 thead th{background:var(--panel);font:650 11px/1.3 ui-monospace,monospace;letter-spacing:.08em;
  text-transform:uppercase;color:var(--ink3)}
 tbody tr:last-child td{border-bottom:none}
+/* Tables whose cells carry prose rather than tokens: let the wide column wrap
+   instead of forcing a long horizontal scroll. */
+table.explain{min-width:0}
+table.explain td:nth-child(2),table.explain th:nth-child(2){white-space:normal;min-width:24ch}
+table.explain td:first-child,table.explain th:first-child{white-space:normal}
 td.n,th.n{text-align:right;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums}
 tr.hi td{background:var(--blue-soft)}
 tr.good td{background:var(--green-soft)}
@@ -94,32 +99,72 @@ footer{margin-top:80px;padding-top:22px;border-top:2px solid var(--ink);color:va
 
 <p class="eyebrow">Technical reference · September 2026</p>
 <h1>Narrow-catalogue classification over frozen encoders</h1>
-<p class="lede">Fit a multinomial logistic head over a frozen image encoder for a
-user-chosen label set; fit two thresholds that choose between naming the label, naming
-its group, and declining; report the result against a declared out-of-set rate.</p>
+<p class="lede">How to build an image classifier over a short, hand-picked list of
+labels — the 20 plants in one garden, the defect types on one production line — on top of
+an encoder you never train, and how to decide when it should say <em>"I don't know"</em>
+instead of guessing. The finding this document exists for is that the two numbers people
+normally publish about such a model can <strong>both improve while the model gets
+worse</strong>, in a way that is reproducible, predictable, and easy to ship by
+accident.</p>
 
-<p class="lede"><strong>First result (§9).</strong> Replace 14 labels spanning 14 genera
-with 14 labels drawn from 2, holding data and encoder fixed: coverage rises 0.618 → 0.806
-and precision holds at 0.985 → 0.978, while the share of in-set observations actually
-named falls 0.761 → 0.476 and closed-set top-1 falls 0.970 → 0.817. Both headline metrics
-improve as the model gets worse.</p>
+<div class="note warn">
+<span class="key">The first result, stated without jargon</span>
+<p>The model always gives one of three replies: <strong>name a label</strong> ("that is
+<em>Sedum album</em>"), <strong>back off to the group</strong> ("that is some kind of
+<em>Sedum</em>"), or <strong>decline</strong> ("I don't know").</p>
+<p>Build it twice. First over 14 plant species from 14 <em>different</em> genera. Then over
+14 species drawn from just <strong>two</strong> genera — 8 <em>Sedum</em>, 6
+<em>Trifolium</em> — with the same training images, the same encoder, and the same fitting
+procedure. Only the <em>relatedness</em> of the chosen labels changes.</p>
+<p>The two numbers almost everyone reports both say the second model is fine:</p>
+<div class="scroll"><table class="explain">
+<thead><tr><th>what people report</th><th>plain meaning</th><th class="n">14 genera</th><th class="n">2 genera</th><th>reads as</th></tr></thead>
+<tbody>
+<tr><td><strong>Coverage</strong></td><td>how often it replies at all, instead of declining</td><td class="n">61.8%</td><td class="n"><b class="b">80.6%</b></td><td class="muted">much better</td></tr>
+<tr><td><strong>Precision</strong></td><td>how often a reply it gives is true</td><td class="n">98.5%</td><td class="n">97.8%</td><td class="muted">unchanged</td></tr>
+</tbody></table></div>
+<p>Both would pass review. But the second model is the worse product, and two numbers that
+usually go unreported say so:</p>
+<div class="scroll"><table class="explain">
+<thead><tr><th>what is usually missing</th><th>plain meaning</th><th class="n">14 genera</th><th class="n">2 genera</th><th>reads as</th></tr></thead>
+<tbody>
+<tr class="good"><td><strong>Label-level share</strong></td><td>how often it names an actual species, rather than backing off to the genus</td><td class="n"><b class="g">76.1%</b></td><td class="n"><b class="w">47.6%</b></td><td>28.5pp worse</td></tr>
+<tr class="good"><td><strong>Closed-set top-1</strong></td><td>how often it is right when it does name a species</td><td class="n"><b class="g">97.0%</b></td><td class="n"><b class="w">81.7%</b></td><td>15.3pp worse</td></tr>
+</tbody></table></div>
+<p><strong>Where the extra coverage came from:</strong> the crowded model answers "it is a
+<em>Sedum</em>" far more often. That reply is true, so precision counts it as correct, and
+it is a reply, so coverage counts it as answered — but when 8 of the user's 14 labels are
+<em>Sedum</em>, it has narrowed almost nothing. <em>The metric improves because the answer
+got less useful.</em></p>
+</div>
 
-<p class="lede"><strong>Second result (§10–11).</strong> The size of that retreat is
-predicted by <em>headroom</em> — coarse-rank minus fine-rank accuracy — at cross-validated
-R² 0.883 over 1,409 arms, against 0.362 for fine accuracy alone. But holding headroom
-fixed at 0.1237 and varying only the assumed out-of-set rate from 0.05 to 0.60 moves the
-predicted quantity from 0.1383 to 0.0015 — a factor of 91 — while the rule's prediction
-stays pinned at 0.2227. The prediction is undefined until that rate is stated.</p>
+<div class="note">
+<span class="key">The second result: it is predictable, but only relative to a stated assumption</span>
+<p>How far a model will back off like this can be estimated <em>before</em> it ships, from
+a quantity called <strong>headroom</strong> — how much more often the model gets the
+<em>group</em> right than the <em>species</em> right, measured on held-out calibration
+data. Across <strong>1,409</strong> model/label-set combinations spanning plants, birds,
+text and audio, headroom predicts the amount of backing-off at cross-validated
+<span class="num">R² 0.883</span>, against <span class="num">0.362</span> for accuracy
+alone.</p>
+<p>That rule is incomplete, and §11 shows how. It ignores <em>how often the user is
+expected to photograph something that is not on the list at all</em> — a rate the builder
+declares up front. Hold headroom fixed and sweep only that rate from 5% to 60%: the
+backing-off the rule is trying to predict moves from <strong>13.8%</strong> of
+observations to <strong>0.15%</strong>, a factor of 91, while the rule's own prediction
+sits unchanged at 22.3% the whole time. <strong>The prediction is meaningless until that
+assumption is named.</strong></p>
+</div>
 
 <div class="stats">
-  <div class="stat b"><b>0.476</b><span>label-level share, genus-crowded 14-class set</span></div>
-  <div class="stat g"><b>0.761</b><span>same size, same data, distinct groups</span></div>
-  <div class="stat b"><b>0.806</b><span>coverage of the <em>crowded</em> set — higher</span></div>
-  <div class="stat g"><b>0.618</b><span>coverage of the better model — lower</span></div>
-  <div class="stat"><b>6.7%</b><span>hemlock named as something edible, union</span></div>
-  <div class="stat"><b>2.5%</b><span>worst single pre-registered confusion</span></div>
-  <div class="stat b"><b>0.883</b><span>CV R² of <em>headroom</em> predicting retreat, 1,409 arms</span></div>
-  <div class="stat"><b>91×</b><span>range of group share at <em>fixed</em> headroom, varying only the assumed out-of-set rate</span></div>
+  <div class="stat g"><b>76.1%</b><span>names an actual species — 14 <em>distinct</em> genera</span></div>
+  <div class="stat b"><b>47.6%</b><span>names an actual species — 14 species from 2 genera</span></div>
+  <div class="stat b"><b>80.6%</b><span>coverage of that <em>worse</em> model — the higher number</span></div>
+  <div class="stat g"><b>61.8%</b><span>coverage of the better model — the lower number</span></div>
+  <div class="stat"><b>6.7%</b><span>poison hemlock given the name of something edible</span></div>
+  <div class="stat"><b>2.5%</b><span>worst single confusion declared in advance — the same model</span></div>
+  <div class="stat b"><b>0.883</b><span>CV R² of <em>headroom</em> predicting the back-off, 1,409 arms</span></div>
+  <div class="stat"><b>91×</b><span>how far that back-off moves at <em>fixed</em> headroom, changing only one declared assumption</span></div>
 </div>
 
 <div class="note">
