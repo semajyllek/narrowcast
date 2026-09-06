@@ -686,3 +686,37 @@ def test_absent_bucket_does_not_lower_the_stated_prevalence():
     inc = df["in_catalog"].to_numpy()
     assert w[~inc].sum() / w.sum() == pytest.approx(0.2)
     assert m["p_ood"] == 0.2
+
+
+# ---- fit is offline: candidates never come from the network ---------------
+
+class _Cfg:
+    """Minimal stand-in for a parsed config; `_candidates` reads only these."""
+    def __init__(self, encoders=(), domain=(), max_size_mb=None, max_candidates=8):
+        self.encoders, self.domain = encoders, domain
+        self.max_size_mb, self.max_candidates = max_size_mb, max_candidates
+
+
+def test_candidates_never_reach_the_hub(monkeypatch):
+    """A Hub search here could not contribute a usable candidate -- load_encoder
+    resolves variants against its own table and raises on a repo id, so every
+    discovered candidate failed inside sweep.evaluate and was swallowed. It also
+    made the candidate set depend on what the Hub returned that day."""
+    from narrowcast import cli, hub
+    monkeypatch.setattr(hub, "search", lambda *a, **k: pytest.fail("fit hit the network"))
+    got = cli._candidates(_Cfg(domain=("plant", "flora"), max_size_mb=50))
+    assert got and all(name in encoders.BY_VARIANT for name, _ in got)
+
+
+def test_candidates_honour_an_explicit_list():
+    from narrowcast import cli
+    got = cli._candidates(_Cfg(encoders=("plantclef24", "ast-audioset")))
+    assert [n for n, _ in got] == ["plantclef24", "ast-audioset"]
+    # an encoder outside the registry has no measured size, and none is invented
+    assert dict(got)["ast-audioset"] is None
+
+
+def test_candidates_respect_the_budget():
+    from narrowcast import cli
+    got = cli._candidates(_Cfg(max_size_mb=20))
+    assert "bioclip2" not in [n for n, _ in got]

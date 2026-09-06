@@ -66,16 +66,17 @@ Declare what you need and let it search:
 task: oregon-plants
 data:        { manifest: ./data.parquet, background: { manifest: ./neg.parquet } }
 objective:   { metric: label_share, minimum: 0.90 }
-constraints: { max_size_mb: 50, domain: [plant, flora] }
+constraints: { max_size_mb: 50, encoders: [plantclef24, mobileclip2_s2] }
 ```
 
 ```bash
 narrowcast fit --config task.yaml --out models/mine
 ```
 
-Candidates come from the built-in registry plus a Hub search, both size-filtered.
-Each runs through the same path a single `build` uses, so the frontier and the
-card cannot disagree:
+Candidates are the encoders you name in `constraints.encoders`, or the built-in
+registry filtered to your budget if you name none. **`fit` makes no network
+calls and its candidate set does not change between runs.** Each runs through the
+same path a single `build` uses, so the frontier and the card cannot disagree:
 
 ```
   encoder                       int4    label_share
@@ -108,17 +109,51 @@ card's numbers are trustworthy.
 > numbers N times and present them as a comparison. Sweeping needs `images` or
 > `manifest`.
 
-## Finding an encoder
+## Choosing an encoder
+
+**You choose it; the tool does not go looking.** Name one or more in
+`constraints.encoders`, or omit the key and `fit` sweeps the built-in registry
+within your budget. The registry is image-only, so any other modality must name
+its encoder.
+
+### Known-good encoders by domain
+
+Sizes are int4 and were **counted from the loaded image tower**, not quoted from
+a paper. Entries marked *precomputed* are used through `--embeddings`: narrowcast
+never loads them, so the name is a label and the size is the upstream model's.
+
+| domain | encoder | int4 | why |
+|---|---|---|---|
+| natural imagery, general | `mobileclip2_s0` | 5.7 MB | smallest that works at all |
+| natural imagery, general | `mobileclip2_s2` | 17.9 MB | the small-budget default |
+| **plants, fungi, animals** | `bioclip2` | 152 MB | strongest measured here; ties a server model at species rank |
+| **plants specifically** | `plantclef24` | 43.3 MB | 1.5pp behind BioCLIP-2, *ahead* on hazard safety; 518px, so slower than its bytes suggest |
+| audio, environmental | `ast-audioset` *(precomputed)* | — | general AudioSet model, not tuned per task |
+| speech / keywords | `wav2vec2-base` *(precomputed)* | — | general speech model; groups by phonetics, not meaning |
+| text | `all-MiniLM-L6-v2` *(precomputed)* | — | 22.7M sentence encoder |
+
+Byte order is not speed order: `plantclef24` is a third of BioCLIP-2's parameters
+and roughly twice its latency, because it runs at 5.3× the pixels. Storage and
+compute are separate budgets and the registry ranks only one.
+
+### Refreshing this list (maintenance)
 
 ```bash
 narrowcast encoders --domain plant --domain flora --budget 50
 ```
 
-Queries the Hugging Face Hub for image encoders and verifies each candidate's
-size **client-side** from `safetensors.total`. The Hub's own `num_parameters`
-filter cannot be trusted — asking for `<100M` returns 303M models, because repos
-without an indexed count pass through silently. Candidates whose size is not
-published are listed separately rather than assumed small.
+Queries the Hugging Face Hub and verifies each candidate's size **client-side**
+from `safetensors.total`. The Hub's own `num_parameters` filter cannot be trusted
+— asking for `<100M` returns 303M models, because repos without an indexed count
+pass through silently. Candidates whose size is not published are listed
+separately rather than assumed small.
+
+**This is a maintenance command, not a build step.** Nothing it prints can be fed
+straight to `fit`: `encode.load_encoder` resolves variants against its own table,
+so adopting a model means adding it there (how to load it) and to
+`encoders.ENCODERS` (its measured size), then naming it in your config. `fit`
+itself never touches the network — a candidate set that depends on what the Hub
+returned today is not one you can reproduce tomorrow.
 
 For many domains someone has already fine-tuned an encoder, and using theirs
 beats compressing a general one. That is not speculation: the strongest

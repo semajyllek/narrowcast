@@ -2,9 +2,14 @@
 
     narrowcast fit      --config task.yaml --out models/mine
     narrowcast plan     --labels my.txt --budget 20
-    narrowcast encoders --domain plant --budget 50
     narrowcast build    --images ./photos --out models/mine
     narrowcast card     models/mine
+
+    narrowcast encoders --domain plant --budget 50    # maintenance only
+
+`fit` and `build` never touch the network: the encoder is whatever the config
+names, or the built-in registry within the budget. `encoders` searches the Hub
+for a human refreshing that registry, and nothing it prints is directly usable.
 """
 
 import argparse
@@ -111,23 +116,29 @@ def cmd_build(args):
 
 
 def _candidates(cfg):
-    """Encoders to try: the config's own list, else the built-in registry plus a
-    Hub search, both filtered to the size budget."""
+    """Encoders to try: the config's own list, else the built-in registry, both
+    filtered to the size budget.
+
+    This used to append a Hub search when the config named a domain, and that
+    could not work. `encode.load_encoder` resolves a variant against a hard-coded
+    table and raises on anything else, so a discovered repo id like
+    `gerald29/plantclef2024` failed inside `sweep.evaluate`, was swallowed by its
+    per-candidate exception handler, and occupied a `max_candidates` slot with an
+    error row. It bought a network call on every fit and could never contribute a
+    usable candidate.
+
+    Discovery still has value -- `plantclef24` was found that way and became the
+    best result in the parent project -- but as **maintenance**, not as part of a
+    build: run `narrowcast encoders`, evaluate what it finds, and add the good
+    ones to `encoders.ENCODERS` and `encode.ENCODERS` deliberately. That keeps
+    `fit` offline, reproducible, and honest about where a size came from.
+    """
     if cfg.encoders:
         return [(e, encoders.BY_VARIANT[e].size_mb() if e in encoders.BY_VARIANT else None)
                 for e in cfg.encoders]
     built_in = [(e.variant, e.size_mb()) for e in encoders.ENCODERS
                 if cfg.max_size_mb is None or e.size_mb() <= cfg.max_size_mb]
-    found = []
-    if cfg.domain:
-        fitting, _, _ = HUB.search(cfg.domain, budget_mb=cfg.max_size_mb)
-        found = [(c.repo, c.size_mb()) for c in fitting]
-    seen, out = set(), []
-    for name, size in built_in + found:
-        if name not in seen:
-            seen.add(name)
-            out.append((name, size))
-    return out[: cfg.max_candidates]
+    return built_in[: cfg.max_candidates]
 
 
 def cmd_fit(args):
@@ -138,6 +149,15 @@ def cmd_fit(args):
     cands = _candidates(cfg)
     if not cands:
         raise SystemExit(f"no candidate encoders fit {cfg.max_size_mb} MB")
+    # `constraints.domain` used to trigger a Hub search here. It no longer selects
+    # anything, and a setting that silently does nothing is worse than one that is
+    # rejected -- so say so rather than let the user believe discovery ran.
+    if cfg.domain and not cfg.encoders:
+        print(f"\n  note: `constraints.domain` no longer selects encoders — `fit` is "
+              f"offline and\n  sweeps the built-in registry. To use a domain-specific "
+              f"model, find one with\n  `narrowcast encoders --domain "
+              f"{' --domain '.join(cfg.domain)}`, add it to the registry, and name "
+              f"it in\n  `constraints.encoders`.", flush=True)
     # Precomputed vectors pin the encoder: `load_rows` returns them untouched and
     # never runs a model, so sweeping N encoders over one embeddings file scores
     # the same numbers N times and calls them a frontier. Refuse rather than
@@ -182,13 +202,20 @@ def cmd_fit(args):
 
 
 def cmd_encoders(args):
-    """Candidate encoders from the Hub, size-verified locally."""
+    """Candidate encoders from the Hub, size-verified locally. A **maintenance**
+    command, not part of any build: nothing it prints can be fed straight to
+    `fit`, because `encode.load_encoder` only resolves variants in its own table.
+    Adding one is a deliberate edit to that table and to `encoders.ENCODERS`."""
     terms = tuple(args.domain or ())
     print(f"\n  searching the Hub"
           + (f" for: {', '.join(terms)}" if terms else " (no domain terms)"), flush=True)
     f, o, u = HUB.search(terms, budget_mb=args.budget)
     print()
     print(HUB.render(f, o, u, budget_mb=args.budget, top=args.top))
+    print(f"\n  These are candidates for a human to evaluate, not encoders `fit` "
+          f"can use.\n  To adopt one: add it to `encode.ENCODERS` (how to load it) "
+          f"and\n  `encoders.ENCODERS` (its measured size), then name it in "
+          f"`constraints.encoders`.")
     print()
     return 0
 
@@ -237,7 +264,9 @@ def main(argv=None):
     common(p_build, out=True)
     p_build.set_defaults(fn=cmd_build)
 
-    p_enc = sub.add_parser("encoders", help="find candidate encoders that fit a size budget")
+    p_enc = sub.add_parser("encoders",
+                           help="[maintenance] search the Hub for candidate encoders; "
+                                "adopting one is a deliberate edit, not a build step")
     p_enc.add_argument("--domain", action="append", metavar="TERM",
                        help="domain term, e.g. plant / car / painting; repeatable")
     p_enc.add_argument("--budget", type=float, metavar="MB",

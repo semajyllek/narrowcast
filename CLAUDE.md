@@ -35,7 +35,7 @@ So no report ever prints coverage without the label-level share beside it.
 | `card.py` | the report, and the consequential-label gate |
 | `sweep.py` | run N candidates, return a frontier, decide or refuse |
 | `config.py` | parse/validate a task config |
-| `hub.py` | find candidate encoders on HF, **size-verified locally** |
+| `hub.py` | find candidate encoders on HF, **size-verified locally**. Maintenance only — no build path calls it |
 | `plan.py` / `projection.py` | pre-compute warnings; projection gated behind `profiles/` |
 
 ## Conventions that are load-bearing
@@ -52,6 +52,16 @@ So no report ever prints coverage without the label-level share beside it.
   clears the floor. `plan` will not project without a domain profile. `fit` will
   not sweep encoders over an `--embeddings` source, because that scores identical
   numbers N times and calls it a comparison.
+- **`fit` and `build` never touch the network.** The encoder is whatever the
+  config names, else the built-in registry within budget, so a candidate set is
+  reproducible tomorrow. `constraints.domain` used to trigger a Hub search here
+  and could never contribute a usable candidate — `encode.load_encoder` resolves
+  variants against its own table and raises on a repo id, so every discovered
+  candidate failed inside `sweep.evaluate` and was swallowed by its per-candidate
+  handler. Discovery is now `narrowcast encoders`, a maintenance command;
+  adopting a model is a deliberate edit to `encode.ENCODERS` and
+  `encoders.ENCODERS`. A config still carrying `domain` gets a printed note
+  rather than a silent no-op.
 - **The caller's `group` column wins.** The default first-whitespace-token rule is
   a Latin-binomial convention; it silently disabled the group rank for every
   non-binomial domain until fixed. Pinned by a test.
