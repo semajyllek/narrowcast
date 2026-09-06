@@ -94,12 +94,22 @@ footer{margin-top:80px;padding-top:22px;border-top:2px solid var(--ink);color:va
 
 <p class="eyebrow">Technical reference · September 2026</p>
 <h1>Narrow-catalogue classification over frozen encoders</h1>
-<p class="lede">How to build a small classifier over a label set someone chose by hand,
-decide when it should refuse to answer, and measure it in a way that does not flatter
-it. The central result is that the two metrics everyone reports move the <em>wrong
-way</em> on exactly the label sets that are hardest to use. The second result is that the
-amount of that damage is largely predictable in advance — from <em>headroom</em> (§10) —
-but only once you also name the operating point (§11).</p>
+<p class="lede">Fit a multinomial logistic head over a frozen image encoder for a
+user-chosen label set; fit two thresholds that choose between naming the label, naming
+its group, and declining; report the result against a declared out-of-set rate.</p>
+
+<p class="lede"><strong>First result (§9).</strong> Replace 14 labels spanning 14 genera
+with 14 labels drawn from 2, holding data and encoder fixed: coverage rises 0.618 → 0.806
+and precision holds at 0.985 → 0.978, while the share of in-set observations actually
+named falls 0.761 → 0.476 and closed-set top-1 falls 0.970 → 0.817. Both headline metrics
+improve as the model gets worse.</p>
+
+<p class="lede"><strong>Second result (§10–11).</strong> The size of that retreat is
+predicted by <em>headroom</em> — coarse-rank minus fine-rank accuracy — at cross-validated
+R² 0.883 over 1,409 arms, against 0.362 for fine accuracy alone. But holding headroom
+fixed at 0.1237 and varying only the assumed out-of-set rate from 0.05 to 0.60 moves the
+predicted quantity from 0.1383 to 0.0015 — a factor of 91 — while the rule's prediction
+stays pinned at 0.2227. The prediction is undefined until that rate is stated.</p>
 
 <div class="stats">
   <div class="stat b"><b>0.476</b><span>label-level share, genus-crowded 14-class set</span></div>
@@ -109,7 +119,7 @@ but only once you also name the operating point (§11).</p>
   <div class="stat"><b>6.7%</b><span>hemlock named as something edible, union</span></div>
   <div class="stat"><b>2.5%</b><span>worst single pre-registered confusion</span></div>
   <div class="stat b"><b>0.883</b><span>CV R² of <em>headroom</em> predicting retreat, 1,409 arms</span></div>
-  <div class="stat"><b>70×</b><span>range of group share at <em>fixed</em> headroom, varying only the assumed out-of-set rate</span></div>
+  <div class="stat"><b>91×</b><span>range of group share at <em>fixed</em> headroom, varying only the assumed out-of-set rate</span></div>
 </div>
 
 <div class="note">
@@ -191,7 +201,7 @@ to 1:</p>
 <div class="scroll"><table>
 <thead><tr><th>term</th><th>definition</th></tr></thead>
 <tbody>
-<tr><td><strong>label-level share</strong></td><td>fraction of in-set observations answered at the fine rank (a specific label named). <em>The number that tells the truth.</em></td></tr>
+<tr><td><strong>label-level share</strong></td><td>fraction of in-set observations answered at the fine rank (a specific label named). The only one of these that falls when the label set is crowded.</td></tr>
 <tr><td><strong>group share</strong></td><td>fraction answered at the coarse rank only — the retreat. Called <em>group-answer share</em> interchangeably.</td></tr>
 <tr><td><strong>decline share</strong></td><td>fraction refused outright.</td></tr>
 <tr><td><strong>coverage</strong></td><td>fraction of <em>all</em> queries answered at either rank — prevalence-weighted across in-set and out-of-set buckets. Counts a group answer exactly like a label answer, which is why it flatters crowded sets.</td></tr>
@@ -209,8 +219,10 @@ label_ok.mean()</code>.</span>
 </div>
 
 <p><strong>Read it as: how much easier is the coarse question than the fine one?</strong>
-Large headroom means retreating to the group buys a lot of accuracy, so retreat is
-tempting. Zero headroom means the group rank is no easier and retreating buys nothing.</p>
+At headroom 0.194 (the 20 Newsgroups arm) a group answer is right 19.4pp more often than a
+label answer, so retreating raises expected utility. At headroom 0.000 the group rank is
+exactly as hard and retreating trades 1.0 for 0.5 with no change in the odds of being
+wrong.</p>
 
 <p>Two properties matter later and are easy to miss:</p>
 <ul>
@@ -251,9 +263,10 @@ vision model covers ~108,000 taxa. A <em>narrow-catalogue</em> classifier answer
 a label set someone chose: the twenty plants in a garden, the defect classes on one
 production line, the birds at one feeder.</p>
 
-<p>Narrowing helps enormously. But it introduces a failure mode that has no analogue in
-the wide-label-space setting, and the standard metrics not only fail to detect it —
-they move in the <em>reassuring</em> direction while it happens.</p>
+<p>Narrowing raises accuracy: on a label set spanning distinct groups, going from 50
+labels to 10 moves top-1 from 0.939 to 0.989. But it introduces a failure mode absent from
+the wide-label-space setting — the model can answer at a coarser rank than the one the
+user asked about — and coverage and precision both <em>rise</em> as that happens.</p>
 
 <h3>The setting</h3>
 <p>Given a chosen label set <span class="num">L = {ℓ₁ … ℓ_K}</span>, a group function
@@ -262,9 +275,10 @@ or may not depict something in <span class="num">L</span>, produce for each imag
 of three outcomes: <b class="b">name the label</b>, <b class="b">name the group</b>, or
 <b class="b">decline</b>.</p>
 
-<p>The group is what makes this interesting. It gives the model somewhere to retreat to
-that is still informative — "it is an oak, I cannot tell which" — and it is where the
-pathology lives.</p>
+<p>The group rank is the load-bearing part. It gives the model a third option between
+naming a label and refusing — "it is an oak, I cannot tell which" — which is informative
+when the set holds two oaks and vacuous when it holds twelve. Coverage and precision score
+both cases identically.</p>
 </section>
 
 <section id="s2">
@@ -286,11 +300,11 @@ d = 512 the head is 21 × 512 × 4 bytes ≈ <b class="b">43 KB</b>, against an 
 17.9–152 MB. Fitting it is a few CPU-seconds on cached embeddings.</p>
 
 <div class="note warn">
-<span class="key">Consequence worth internalising</span>
-<p><strong>Choosing fewer labels does not produce a smaller model.</strong> The size is
-almost entirely encoder. A tool that promises "pick 20 classes, get a tiny model" is
-promising something the architecture does not deliver — the head shrinks from 1.5 MB to
-43 KB and the 152 MB encoder does not move at all.</p>
+<span class="key">Consequence for anyone sizing a deployment</span>
+<p><strong>Choosing fewer labels does not produce a smaller model.</strong> Going from ~700
+labels to 20 shrinks the head from 1.5 MB to 43 KB and leaves the encoder unchanged: on a
+152 MB bundle that is 1.0% of the total falling to 0.03%. A tool promising "pick 20
+classes, get a tiny model" is promising something this architecture cannot deliver.</p>
 </div>
 
 <p>The reject class is optional and its absence is <em>reported</em>, not silently
@@ -394,10 +408,11 @@ s ≤ γ ≤ Σ<sub>i</sub> p<sub>i</sub> = 1 − P(<code>__OTHER__</code> | x)
 With <span class="num">t_group = 0.70, t_label = 0.55</span>: γ = 0.87 ≥ 0.70 so it does
 not decline; s = 0.34 &lt; 0.55 so it answers <b class="b">"Sedum"</b>.</p>
 
-<p>This is the correct behaviour and also the seed of the problem. The answer is true, it
-is delivered with high confidence, it scores as a <em>correct</em> answer in coverage
-and precision — and if four of the user's five labels are <em>Sedum</em>, it has told
-them almost nothing.</p>
+<p>This is the correct behaviour under the declared utilities, and it is also the failure
+mode. The answer is true, and it counts as one answered query and one correct answer in
+both headline metrics. But three of these five labels are <em>Sedum</em>, so it has
+narrowed five candidates to three — and coverage and precision cannot distinguish that
+from narrowing five to one.</p>
 </section>
 
 <section id="s5">
@@ -438,15 +453,16 @@ deletes the product while scoring beautifully.</p>
 <p>The <code>wrong: −4.0</code> figure was raised from −2.0 once thresholds began being
 fitted at a stated prevalence. The frontier it moves along, on held-out data:
 μ=2 gives precision 0.944 at coverage 0.797; <strong>μ=4 gives 0.965 at 0.747</strong>;
-μ=32 gives 0.991 at 0.645 but label-level answering collapses to 0.126. Reaching 99%
-precision costs essentially all label-level answering, which is not a better product.</p>
+μ=32 gives 0.991 at 0.645 but label-level answering falls to 0.126 — that is, 99.1%
+precision is reached while naming a label on 12.6% of in-set observations.</p>
 </div>
 
 <div class="note warn">
 <span class="key">Known limitation</span>
 <p><code>group_correct</code> is a flat 0.5 regardless of how much the group narrows the
 field. On a label set where every member shares one group, a group answer conveys zero
-information and still scores 0.5. This is the direct cause of the pathology in §9. A
+information and still scores 0.5. This is why the crowded arm in §9 retreats instead of
+declining, and so why its coverage rises. A
 group-informativeness term would fix it — and by this project's own conventions it must
 be declared before being fitted, so it remains open rather than quietly patched.</p>
 </div>
@@ -554,9 +570,8 @@ well as the label column. <code>make_splits</code> therefore saw a single cluste
 <code>clusters[:1//2]</code> is empty — so <strong>all 1,554 background rows went to
 test and none to calibration</strong>. Thresholds were being fitted with no distant
 negatives at all.</p>
-<p>Fixing it moved calibration from 562 rows to 1,402 and the operating point a long way:
-coverage <del>0.753</del> → <b class="g">0.618</b>, precision <del>0.961</del> →
-<b class="g">0.985</b>. The clustering identity now carries the real label for every row
+<p>Fixing it moved calibration from 562 rows to 1,402, coverage <del>0.753</del> →
+<b class="g">0.618</b> and precision <del>0.961</del> → <b class="g">0.985</b>. The clustering identity now carries the real label for every row
 including background, while <code>truth</code> keeps <code>__OTHER__</code> so
 correctness flags stay false.</p>
 </div>
@@ -594,14 +609,14 @@ by the same model, built and measured identically. One is crowded — 8 <em>Sedu
 <tbody>
 <tr><td>Coverage</td><td class="n"><b class="b">0.806</b></td><td class="n">0.618</td><td class="muted">crowded looks better</td></tr>
 <tr><td>Precision</td><td class="n">0.978</td><td class="n">0.985</td><td class="muted">indistinguishable</td></tr>
-<tr class="good"><td><strong>Label-level share</strong></td><td class="n"><b class="w">0.476</b></td><td class="n"><b class="g">0.761</b></td><td>the truth</td></tr>
+<tr class="good"><td><strong>Label-level share</strong></td><td class="n"><b class="w">0.476</b></td><td class="n"><b class="g">0.761</b></td><td>28.5pp fewer named</td></tr>
 <tr><td>Closed-set top-1</td><td class="n">0.817</td><td class="n">0.970</td><td class="muted">15pp worse when it does name</td></tr>
 </tbody></table></div>
 
-<p><strong>The crowded set answers a third more queries at the same precision and is the
-worse model in every way its owner cares about.</strong> It buys the coverage with group
-answers that narrow nothing — "it is a <em>Sedum</em>" when eight of fourteen labels are
-<em>Sedum</em> — and it is 15pp less accurate when it does commit to a label.</p>
+<p><strong>The crowded set answers 30% more queries at the same precision, names a label
+on 28.5pp fewer of them, and is 15.3pp less accurate when it does name one.</strong> The
+extra coverage is bought with group answers that narrow nothing — "it is a
+<em>Sedum</em>" when eight of fourteen labels are <em>Sedum</em>.</p>
 
 <h3>Why coverage inverts</h3>
 <p>Recall from §4 that <span class="num">γ ≥ s</span>, with equality only when the top
@@ -632,11 +647,11 @@ observations answered at the fine rank — records what happened.</p>
 <tr><td class="muted">Plants, crowded</td><td class="n muted">2</td><td class="n muted">0.806</td><td class="n muted">0.978</td><td class="n muted">0.476</td><td class="n muted">0.817</td></tr>
 </tbody></table></div>
 
-<p>All three predictions held: higher coverage, comparable precision, and a 24pp collapse
-in label-level share against 28.5pp on plants. The coverage rise is much smaller on birds
-(+1.8pp vs +18.8pp) so the trap is not identical in shape — but the load-bearing part is.
-<em>Larus</em> and <em>Calidris</em> are the groups birders themselves consider hardest,
-so this is a fair analogue rather than a contrived one.</p>
+<p>All three predictions held: higher coverage, precision within 0.2pp, and a 24.0pp fall
+in label-level share against 28.5pp on plants. The coverage rise is far smaller on birds
+(+1.8pp against +18.8pp), so the coverage inflation is not a fixed quantity; the
+label-level collapse is what reproduces. <em>Larus</em> and <em>Calidris</em> are the
+groups birders themselves rank hardest, so the crowding is not contrived.</p>
 
 <div class="note">
 <span class="key">What this licenses</span>
@@ -653,9 +668,9 @@ exists for the requested domain; there is no fallback to the plant grid.</p>
 
 <p>§9 establishes that crowded label sets retreat to the group rank and that this is
 invisible in coverage and precision. The obvious next question is whether the amount of
-retreat can be <em>predicted</em> before building anything. It largely can, and the
-quantity that does it is <a href="#notation">headroom</a> — coarse-rank accuracy minus
-fine-rank accuracy on the calibration split.</p>
+retreat can be <em>predicted</em> from the calibration split, before the test half is
+touched. It can, to cross-validated R² 0.883, and the predictor is
+<a href="#notation">headroom</a> — coarse-rank accuracy minus fine-rank accuracy.</p>
 
 <div class="math">
 h = accuracy(coarse rank) − accuracy(fine rank)&nbsp;&nbsp;<span class="muted">on in-set calibration rows</span><br><br>
@@ -734,22 +749,23 @@ inflammatory + 2 genodermatoses); the varied arm is six conditions in six groups
 <p>Hold headroom <em>exactly</em> fixed and vary only <span class="num">p<sub>ood</sub></span>,
 the assumed out-of-set rate. Headroom cannot move — it is computed on the calibration
 split with no deployment weight (see <a href="#notation">Notation</a>) — so the rule's
-prediction is pinned at <span class="num">0.223</span> throughout:</p>
+prediction is pinned at <span class="num">1.8 × 0.1237 = 0.2227</span> throughout:</p>
 
 <div class="scroll"><table>
 <thead><tr><th class="n">p<sub>ood</sub></th><th class="n">headroom</th><th class="n">predicted floor</th><th class="n">t<sub>group</sub></th><th class="n">group share</th><th class="n">decline share</th></tr></thead>
 <tbody>
-<tr class="good"><td class="n">0.05</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.535</td><td class="n"><b class="g">0.138</b></td><td class="n">0.267</td></tr>
-<tr><td class="n">0.10</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.573</td><td class="n">0.133</td><td class="n">0.308</td></tr>
-<tr class="hi"><td class="n">0.20</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.671</td><td class="n">0.078</td><td class="n">0.426</td></tr>
-<tr><td class="n">0.40</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.755</td><td class="n">0.029</td><td class="n">0.564</td></tr>
-<tr><td class="n">0.60</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.835</td><td class="n"><b class="w">0.002</b></td><td class="n">0.753</td></tr>
+<tr class="good"><td class="n">0.05</td><td class="n">0.1237</td><td class="n">0.2227</td><td class="n">0.535</td><td class="n"><b class="g">0.1383</b></td><td class="n">0.267</td></tr>
+<tr><td class="n">0.10</td><td class="n">0.1237</td><td class="n">0.2227</td><td class="n">0.573</td><td class="n">0.1326</td><td class="n">0.308</td></tr>
+<tr class="hi"><td class="n">0.20</td><td class="n">0.1237</td><td class="n">0.2227</td><td class="n">0.671</td><td class="n">0.0784</td><td class="n">0.426</td></tr>
+<tr><td class="n">0.40</td><td class="n">0.1237</td><td class="n">0.2227</td><td class="n">0.755</td><td class="n">0.0287</td><td class="n">0.564</td></tr>
+<tr><td class="n">0.60</td><td class="n">0.1237</td><td class="n">0.2227</td><td class="n">0.835</td><td class="n"><b class="w">0.0015</b></td><td class="n">0.753</td></tr>
 </tbody></table></div>
 
 <p>Headroom is constant to <strong>machine precision</strong> down that column — verified
 per seed and per fit domain, maximum spread 0.0. Meanwhile the thing it predicts ranges
-over <span class="num">0.002–0.138</span>, a factor of <strong>70</strong>, and sits
-<em>below</em> the floor at every operating point.</p>
+over <span class="num">0.0015–0.1383</span>, a factor of <strong>91</strong>, and sits
+<em>below</em> the floor at every operating point — by 0.084 at
+<span class="num">p<sub>ood</sub></span> = 0.05 and by 0.221 at 0.60.</p>
 
 <div class="note warn">
 <span class="key">The mechanism: t_group squeezes the retreat band</span>
@@ -831,9 +847,10 @@ clique interval alone would understate the uncertainty severalfold.</p>
 <section id="s12">
 <div class="sh"><p class="eyebrow">12</p><h2>Safety: per-pair vs. union</h2></div>
 
-<p>When being wrong is expensive, the natural instinct is to enumerate the dangerous
-confusions and measure each. That is necessary and <em>not sufficient</em>, and the gap
-between the two is large enough to pass a model that should fail.</p>
+<p>When being wrong is expensive, the usual practice is to enumerate the dangerous
+confusions and measure each. That is necessary and not sufficient: below, no single
+declared pair exceeds 2.5% while their union reaches 6.7% against a 1% bar — so a
+per-pair report passes a model the union report fails.</p>
 
 <p>Test: 27 Oregon species, 6,023 images over 4,057 observations, split by observation.
 The dangerous pairs were named in a pre-registration written before any image was
@@ -908,10 +925,11 @@ frozen encoders, 15 draws per point, random (mostly cross-group) subsets.</p>
 <tr><td class="n">50</td><td class="n">0.9386</td><td class="n">0.8990</td><td class="n">4.0pp</td><td class="n">0.8666</td><td class="n">7.2pp</td></tr>
 </tbody></table></div>
 
-<p>The penalty shrinks monotonically as the catalogue narrows. The obvious confound was
-checked: the reject class draws on a fixed pool, so the label:background ratio shifts ~5×
-across this range. Halving background at K=10 moved the gaps 1.6→1.2pp and 3.4→3.5pp —
-the trend is encoder capacity, not fit composition.</p>
+<p>The penalty shrinks monotonically as the catalogue narrows: 4.0 → 1.6pp for S2 between
+K=50 and K=10. One confound was checked, since the reject class draws on a fixed pool and
+the label:background ratio therefore shifts ~5× across this range. Halving background at
+K=10 moved the gaps 1.6 → 1.2pp and 3.4 → 3.5pp, so the trend tracks encoder capacity
+rather than fit composition.</p>
 
 <div class="note retract">
 <span class="key">Retracted in place</span>
