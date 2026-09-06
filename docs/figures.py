@@ -147,14 +147,17 @@ def fig_domains(df):
                             if c == C3 else "")
                     s.append(f'<rect x="{x:.1f}" y="{by}" width="{max(w-2,0.8):.1f}" '
                              f'height="{barh}" rx="2.5" fill="{c}"{edge}/>')
-                if w > 34:
+                if w > 42:
+                    # carry the unit on the mark: the caption calls these
+                    # percentages and a bare "72" beside a "0.72" elsewhere in
+                    # the document is a unit ambiguity, not a saving.
                     ink = SURF if c != C3 else INK2
-                    s.append(_txt(x + w / 2 - 1, by + barh - 4.5, f"{v*100:.0f}",
+                    s.append(_txt(x + w / 2 - 1, by + barh - 4.5, f"{v*100:.0f}%",
                                   10.5, ink, "middle", 700, mono=True))
                 x += w
         # the number that matters: how the group share was paid for
         d = (idx[ca].label_share - idx[va].label_share) * 100
-        s.append(_txt(W - 6, y + barh + 2, f"{d:+.0f}pp", 11.5,
+        s.append(_txt(W - 6, y + barh + 2, f"{d:+.1f} pp", 11.5,
                       INK3, "end", 700, mono=True))
         y += 2 * barh + 3 + gap
     s.append(_txt(W - 6, y + 4, "change in label share", 10, INK3, "end"))
