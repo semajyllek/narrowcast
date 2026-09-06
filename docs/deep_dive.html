@@ -94,7 +94,9 @@ footer{margin-top:80px;padding-top:22px;border-top:2px solid var(--ink);color:va
 <p class="lede">How to build a small classifier over a label set someone chose by hand,
 decide when it should refuse to answer, and measure it in a way that does not flatter
 it. The central result is that the two metrics everyone reports move the <em>wrong
-way</em> on exactly the label sets that are hardest to use.</p>
+way</em> on exactly the label sets that are hardest to use. The second result is that the
+amount of that damage is largely predictable in advance — from <em>headroom</em> (§10) —
+but only once you also name the operating point (§11).</p>
 
 <div class="stats">
   <div class="stat b"><b>0.476</b><span>label-level share, genus-crowded 14-class set</span></div>
@@ -103,6 +105,8 @@ way</em> on exactly the label sets that are hardest to use.</p>
   <div class="stat g"><b>0.618</b><span>coverage of the better model — lower</span></div>
   <div class="stat"><b>6.7%</b><span>hemlock named as something edible, union</span></div>
   <div class="stat"><b>2.5%</b><span>worst single pre-registered confusion</span></div>
+  <div class="stat b"><b>0.883</b><span>CV R² of <em>headroom</em> predicting retreat, 1,409 arms</span></div>
+  <div class="stat"><b>70×</b><span>range of group share at <em>fixed</em> headroom, varying only the assumed out-of-set rate</span></div>
 </div>
 
 <div class="note">
@@ -113,13 +117,18 @@ established or killed each claim.</p>
 <p><strong>Treated as a black box:</strong> the encoders themselves. BioCLIP-2,
 MobileCLIP2 and PlantCLEF2024 are used frozen, never fine-tuned, and are documented
 only by their input/output contract — an image in, an L2-normalised vector out.
-Distillation into a smaller encoder was attempted and failed; see §11.</p>
+Distillation into a smaller encoder was attempted and failed; see §13.</p>
 <p><strong>Code:</strong> <a href="https://github.com/semajyllek/narrowcast">narrowcast</a>
-(the tool) and <a href="https://github.com/semajyllek/plantid">plantid</a> (the
-research record). Every formula below is transcribed from those sources.</p>
+(the tool), <a href="https://github.com/semajyllek/plantid">plantid</a> (the research
+record), and the demo repos that consume the installed package —
+<a href="https://github.com/semajyllek/narrowcast-kws">narrowcast-kws</a> (audio) and
+<a href="https://github.com/semajyllek/narrowcast-derm">narrowcast-derm</a> (medical
+imaging). Every formula below is transcribed from those sources.</p>
 </div>
 
 <div class="toc">
+<p style="margin:0 0 12px;font:650 11px/1 ui-monospace,monospace;letter-spacing:.12em;
+text-transform:uppercase;color:var(--ink3)">Start here → <a href="#notation">Notation and terms</a></p>
 <ol>
 <li><a href="#s1">The problem</a></li>
 <li><a href="#s2">Architecture: what is actually built per user</a></li>
@@ -132,10 +141,105 @@ research record). Every formula below is transcribed from those sources.</p>
 <li><a href="#s9">The coarse-answer trap</a></li>
 <li><a href="#s10">Safety: per-pair vs. union</a></li>
 <li><a href="#s11">The size/accuracy frontier</a></li>
-<li><a href="#s12">Measuring contamination</a></li>
-<li><a href="#s13">Failure modes and open questions</a></li>
+<li><a href="#s10">Headroom: predicting the retreat</a></li>
+<li><a href="#s11">What headroom omits: the operating point</a></li>
+<li><a href="#s12">Safety: per-pair vs. union</a></li>
+<li><a href="#s13">The size/accuracy frontier</a></li>
+<li><a href="#s14">Measuring contamination</a></li>
+<li><a href="#s15">Failure modes and open questions</a></li>
 </ol>
 </div>
+
+<section id="notation" style="margin-top:44px">
+<div class="sh"><p class="eyebrow">Reference</p><h2>Notation and terms</h2></div>
+
+<p>Everything below is defined once here and used consistently. The two thresholds and
+<em>headroom</em> carry most of the weight, and all three are easy to misread.</p>
+
+<h3>The two scores, computed per image</h3>
+<div class="scroll"><table>
+<thead><tr><th>symbol</th><th>name</th><th>what it is</th></tr></thead>
+<tbody>
+<tr><td class="n">s</td><td><code>label_conf</code></td><td>the largest single-label posterior — how sure the model is of its <em>best guess</em></td></tr>
+<tr><td class="n">γ</td><td><code>group_conf</code></td><td>the largest <em>group</em> mass: sum the posteriors of all labels sharing a group, take the biggest such sum</td></tr>
+</tbody></table></div>
+<p><span class="num">s ≤ γ</span> always (proved in §4), which is what lets two independent
+thresholds define a well-ordered three-way decision.</p>
+
+<h3>The two thresholds, fitted once per model</h3>
+<div class="scroll"><table>
+<thead><tr><th>symbol</th><th>compared against</th><th>what crossing it means</th></tr></thead>
+<tbody>
+<tr><td class="n">t<sub>group</sub></td><td>γ</td><td><strong>the decline threshold.</strong> If γ &lt; t<sub>group</sub> the model refuses to answer at all. Fitted mostly to reject things outside the label set — so it moves with the assumed out-of-set rate, which is the subject of §11.</td></tr>
+<tr><td class="n">t<sub>label</sub></td><td>s</td><td><strong>the retreat threshold.</strong> If γ passed but s &lt; t<sub>label</sub>, the model declines to name a label and answers at group rank instead.</td></tr>
+</tbody></table></div>
+
+<div class="note warn">
+<span class="key">The most common misreading</span>
+<p><code>t_group</code> is <em>not</em> "the threshold for giving a group answer". It is the
+threshold for answering <strong>at all</strong>. A group answer requires passing
+<code>t_group</code> and failing <code>t_label</code> — it lives in the band
+<em>between</em> them. When <code>t_group</code> rises, that band is squeezed from below
+and would-be group answers become declines. That single fact is the mechanism in §11.</p>
+</div>
+
+<h3>The three outcomes, and the shares that report them</h3>
+<p>Every in-set observation ends in exactly one of three states, so these three shares sum
+to 1:</p>
+<div class="scroll"><table>
+<thead><tr><th>term</th><th>definition</th></tr></thead>
+<tbody>
+<tr><td><strong>label-level share</strong></td><td>fraction of in-set observations answered at the fine rank (a specific label named). <em>The number that tells the truth.</em></td></tr>
+<tr><td><strong>group share</strong></td><td>fraction answered at the coarse rank only — the retreat. Called <em>group-answer share</em> interchangeably.</td></tr>
+<tr><td><strong>decline share</strong></td><td>fraction refused outright.</td></tr>
+<tr><td><strong>coverage</strong></td><td>fraction of <em>all</em> queries answered at either rank — prevalence-weighted across in-set and out-of-set buckets. Counts a group answer exactly like a label answer, which is why it flatters crowded sets.</td></tr>
+<tr><td><strong>precision</strong></td><td>fraction of answers that are correct, counting a correct group answer as correct.</td></tr>
+<tr><td><strong>closed-set top-1</strong></td><td>plain accuracy on in-set rows, ignoring the cascade entirely.</td></tr>
+</tbody></table></div>
+
+<h3>Headroom</h3>
+<div class="math">
+headroom = (coarse-rank accuracy) − (fine-rank accuracy)
+<span class="where">Both measured on the <strong>calibration split</strong>, on in-set rows
+only, unweighted. Coarse accuracy = how often the true <em>group</em> is top-ranked; fine
+accuracy = how often the true <em>label</em> is. In code: <code>group_ok.mean() −
+label_ok.mean()</code>.</span>
+</div>
+
+<p><strong>Read it as: how much easier is the coarse question than the fine one?</strong>
+Large headroom means retreating to the group buys a lot of accuracy, so retreat is
+tempting. Zero headroom means the group rank is no easier and retreating buys nothing.</p>
+
+<p>Two properties matter later and are easy to miss:</p>
+<ul>
+<li>Headroom is a property of the <strong>label set and encoder</strong>, not of the
+thresholds. It is computed from which rows the head gets right, before any threshold is
+applied.</li>
+<li>Headroom is <strong>invariant to the assumed out-of-set rate</strong>, because no
+deployment weight enters it. This is exactly what makes the experiment in §11 clean: it
+pins the prediction while the thing being predicted moves.</li>
+</ul>
+
+<div class="note">
+<span class="key">Headroom is bounded above by 1 − fine accuracy</span>
+<p>And it <em>equals</em> that bound whenever every label shares one group, because then
+the coarse question has a single possible answer and coarse accuracy is exactly 1.000.
+A one-group label set therefore has no measurable headroom — it has an identity. This
+sinks any experiment built on such a set, and it is why the crowded arms throughout this
+document always have <strong>two or more</strong> groups.</p>
+</div>
+
+<h3>Buckets and prevalence</h3>
+<div class="scroll"><table>
+<thead><tr><th>term</th><th>definition</th></tr></thead>
+<tbody>
+<tr><td><code>in_catalog</code></td><td>held-out rows of the chosen labels</td></tr>
+<tr><td><code>near_ood</code></td><td>rows of labels <em>outside</em> the set that share a group with it — the hard negatives</td></tr>
+<tr><td><code>distant_ood</code></td><td>unrelated negatives, supplied as background</td></tr>
+<tr><td class="n">p<sub>ood</sub></td><td>the <strong>assumed</strong> share of real queries that are not on the label set. Declared, never measured from the evaluation set. See §6.</td></tr>
+<tr><td><strong>cluster</strong></td><td>the unit that must not straddle a train/test split — several photographs of one subject. Also the unit resampled by the bootstrap, which is one column doing two jobs; see §11.</td></tr>
+</tbody></table></div>
+</section>
 
 <section id="s1">
 <div class="sh"><p class="eyebrow">01</p><h2>The problem</h2></div>
@@ -543,7 +647,187 @@ exists for the requested domain; there is no fallback to the plant grid.</p>
 </section>
 
 <section id="s10">
-<div class="sh"><p class="eyebrow">10</p><h2>Safety: per-pair vs. union</h2></div>
+<div class="sh"><p class="eyebrow">10</p><h2>Headroom: predicting the retreat</h2></div>
+
+<p>§9 establishes that crowded label sets retreat to the group rank and that this is
+invisible in coverage and precision. The obvious next question is whether the amount of
+retreat can be <em>predicted</em> before building anything. It largely can, and the
+quantity that does it is <a href="#notation">headroom</a> — coarse-rank accuracy minus
+fine-rank accuracy on the calibration split.</p>
+
+<div class="math">
+h = accuracy(coarse rank) − accuracy(fine rank)&nbsp;&nbsp;<span class="muted">on in-set calibration rows</span><br><br>
+group share ≈ 1.8 · h&nbsp;&nbsp;<span class="muted">— as a <em>floor</em>, not a point estimate</span>
+</div>
+
+<p>Fitted over <strong>1,409 arms</strong> spanning plants, birds, text and two audio
+corpora, headroom predicts group-answer share at cross-validated
+<span class="num">R² = 0.883</span>, against <span class="num">0.362</span> for fine
+accuracy alone. It began as a hypothesis at n = 4 and survived the scale-up.</p>
+
+<div class="scroll"><table>
+<thead><tr><th>crowded arm</th><th class="n">fine</th><th class="n">coarse</th><th class="n">headroom</th><th class="n">Δcoverage</th><th class="n">Δlabel-level</th></tr></thead>
+<tbody>
+<tr class="hi"><td>Text, 20 Newsgroups</td><td class="n">0.771</td><td class="n">0.965</td><td class="n"><b class="w">+0.194</b></td><td class="n">+0.216</td><td class="n"><b class="w">−0.326</b></td></tr>
+<tr><td>Birds (image)</td><td class="n">0.905</td><td class="n">0.998</td><td class="n">+0.093</td><td class="n">+0.018</td><td class="n">−0.240</td></tr>
+<tr><td>Speech Commands, acoustic groups</td><td class="n">0.887</td><td class="n">0.974</td><td class="n">+0.087</td><td class="n">+0.196</td><td class="n"><b class="g">+0.030</b></td></tr>
+<tr><td>ESC-50</td><td class="n">0.913</td><td class="n">0.990</td><td class="n">+0.077</td><td class="n">−0.095</td><td class="n">−0.107</td></tr>
+<tr><td>Speech Commands, semantic groups</td><td class="n">0.897</td><td class="n">0.947</td><td class="n">+0.050</td><td class="n">−0.027</td><td class="n">−0.077</td></tr>
+</tbody></table></div>
+
+<h3>The controlled comparison</h3>
+<p>The cleanest evidence holds everything fixed but the grouping. One fitted head, fine
+accuracy pinned at <span class="num">0.659</span>, only the <em>group column</em> varying:
+group answers move <span class="num">0.022 → 0.417</span> and coverage
+<span class="num">0.200 → 0.500</span>. <strong>The grouping alone moves the
+product</strong>, with the classifier untouched.</p>
+
+<div class="note warn">
+<span class="key">Headroom predicts retreat, not harm</span>
+<p>The Speech Commands row above has positive headroom, retreats as predicted, and
+label-level share <em>rises</em>. Decomposition explains it: there the group answers came
+out of <strong>declines</strong> (0.430 → 0.199), so coverage inflated harmlessly. In the
+text arm they came out of <strong>label answers</strong> (0.719 → 0.302) and quality
+collapsed. Same mechanism, two different shadows — which is why no report here drops the
+label-level share, and why the crowded-set warning is a warning about a <em>risk</em>.</p>
+</div>
+
+<div class="note">
+<span class="key">Two honest qualifications, and a third in §11</span>
+<p>Headroom is <em>nearly</em> but not exactly the governing quantity: tested in raw units,
+<span class="num">b + c = +0.430</span> with a CI excluding zero, meaning coarse accuracy
+weighs about 25% more than fine. And below the <span class="num">0.889</span> break-even
+retreat is suppressed rather than eliminated. These are one story — coarse gets a second
+bite through the threshold.</p>
+<p>Test that comparison in <strong>raw</strong> units. With unequal standard deviations,
+<span class="num">b + c = 0</span> on z-scores tests a different hypothesis and reports the
+asymmetry with the <em>wrong sign</em>. It did, in a first draft.</p>
+</div>
+
+<p>Where does <span class="num">0.889</span> come from? Directly from the declared
+utilities in §5. Retreating to the group on an in-set row earns
+<span class="num">0.5</span> when the group is right and <span class="num">−4.0</span> when
+it is not; declining earns <span class="num">0.0</span>. So retreat is worth it only when
+group accuracy <span class="num">q</span> satisfies:</p>
+
+<div class="math">
+0.5·q − 4.0·(1 − q) &gt; 0&nbsp;&nbsp;⟺&nbsp;&nbsp;q &gt; 4.0 / 4.5 = <b class="b">0.889</b>
+</div>
+</section>
+
+<section id="s11">
+<div class="sh"><p class="eyebrow">11</p><h2>What headroom omits: the operating point</h2></div>
+
+<p>The <span class="num">1.8 ×</span> rule was calibrated on arms where retreat actually
+happens. Applying it to a new domain exposed a variable it does not carry — and the
+variable is not the domain.</p>
+
+<p><strong>Setting.</strong> 2,688 clinical dermatology photographs from Fitzpatrick17k
+(Atlas Dermatologico rows), 86 conditions, embedded with <code>facebook/dinov2-base</code>
+— a general self-supervised encoder with no dermatology supervision and no fine-tuning on
+this corpus. The crowded arm is six conditions in <strong>two</strong> groups (4
+inflammatory + 2 genodermatoses); the varied arm is six conditions in six groups.</p>
+
+<h3>The prediction failed, and not because of the domain</h3>
+<p>Hold headroom <em>exactly</em> fixed and vary only <span class="num">p<sub>ood</sub></span>,
+the assumed out-of-set rate. Headroom cannot move — it is computed on the calibration
+split with no deployment weight (see <a href="#notation">Notation</a>) — so the rule's
+prediction is pinned at <span class="num">0.223</span> throughout:</p>
+
+<div class="scroll"><table>
+<thead><tr><th class="n">p<sub>ood</sub></th><th class="n">headroom</th><th class="n">predicted floor</th><th class="n">t<sub>group</sub></th><th class="n">group share</th><th class="n">decline share</th></tr></thead>
+<tbody>
+<tr class="good"><td class="n">0.05</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.535</td><td class="n"><b class="g">0.138</b></td><td class="n">0.267</td></tr>
+<tr><td class="n">0.10</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.573</td><td class="n">0.133</td><td class="n">0.308</td></tr>
+<tr class="hi"><td class="n">0.20</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.671</td><td class="n">0.078</td><td class="n">0.426</td></tr>
+<tr><td class="n">0.40</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.755</td><td class="n">0.029</td><td class="n">0.564</td></tr>
+<tr><td class="n">0.60</td><td class="n">0.124</td><td class="n">0.223</td><td class="n">0.835</td><td class="n"><b class="w">0.002</b></td><td class="n">0.753</td></tr>
+</tbody></table></div>
+
+<p>Headroom is constant to <strong>machine precision</strong> down that column — verified
+per seed and per fit domain, maximum spread 0.0. Meanwhile the thing it predicts ranges
+over <span class="num">0.002–0.138</span>, a factor of <strong>70</strong>, and sits
+<em>below</em> the floor at every operating point.</p>
+
+<div class="note warn">
+<span class="key">The mechanism: t_group squeezes the retreat band</span>
+<p>A group answer requires <span class="num">γ ≥ t<sub>group</sub></span> <em>and</em>
+<span class="num">s &lt; t<sub>label</sub></span> — it lives in the band between the two
+thresholds. <code>t_group</code> is fitted mostly as an <strong>out-of-set rejection</strong>
+threshold, so it climbs with <span class="num">p<sub>ood</sub></span> (0.535 → 0.835) and
+eats that band from below. Rows that should have retreated are declined instead.</p>
+<p>Measured directly: of in-set rows failing <code>t_label</code> — the rows that
+<em>should</em> retreat — between <strong>59% and 93%</strong> also fail
+<code>t_group</code> and are declined.</p>
+</div>
+
+<p>So the corrected statement:</p>
+
+<div class="math">
+headroom predicts the retreat that is <b class="b">available</b>.<br>
+p<sub>ood</sub> and encoder strength decide how much is <b class="b">realised</b>.
+</div>
+
+<p><strong>This is a boundary condition, not a fact about dermatology.</strong> The
+dermatology arm ran at closed-set top-1 ≈ 0.75, against 0.84–0.97 for the plant arms the
+rule was fitted on. A weak encoder or a high out-of-set rate reaches the same place in any
+domain — plants included. The sweep exists specifically to separate "this domain is
+different" from "this operating point is different", and it separates them.</p>
+
+<div class="note">
+<span class="key">Practical consequence</span>
+<p>Do not quote <span class="num">1.8 × headroom</span> as an expected group share without
+naming an operating point. The tool already gates its card on <em>measured</em> retreat
+rather than on headroom; that decision is what this result vindicates.</p>
+</div>
+
+<h3>The population-shift test, and why it is reported as a null</h3>
+<p>The same corpus carries an annotator-assigned skin type per image, allowing a model to
+be fitted on one population and evaluated on another <em>inside a single atlas</em> — same
+photographer, same equipment, same label vocabulary. Train and calibration rows are
+shared between each control and its shifted twin, so headroom is identical within a pair
+and only the test population moves.</p>
+
+<div class="scroll"><table>
+<thead><tr><th>condition</th><th class="n">headroom</th><th class="n">floor</th><th class="n">group share</th><th class="n">95% CI (conditions)</th><th>verdict</th></tr></thead>
+<tbody>
+<tr><td>control light→light</td><td class="n">0.155</td><td class="n">0.279</td><td class="n">0.109</td><td class="n">0.026–0.221</td><td><b class="w">failed</b></td></tr>
+<tr><td>shift light→dark</td><td class="n">0.155</td><td class="n">0.279</td><td class="n">0.035</td><td class="n">0.017–0.062</td><td><b class="w">failed</b></td></tr>
+<tr><td>control dark→dark</td><td class="n">0.092</td><td class="n">0.166</td><td class="n">0.048</td><td class="n">0.008–0.091</td><td><b class="w">failed</b></td></tr>
+<tr><td>shift dark→light</td><td class="n">0.092</td><td class="n">0.166</td><td class="n">0.110</td><td class="n">0.053–0.175</td><td>supported</td></tr>
+</tbody></table></div>
+
+<p>The two hardest failures are <em>in-domain controls</em>, so the failure above is not a
+shift effect at all — which is what sent the investigation to the
+<span class="num">p<sub>ood</sub></span> sweep.</p>
+
+<div class="note retract">
+<span class="key">Declared in advance, and it fired</span>
+<p>The pre-registration stated that skin type within one atlas is a <em>mild</em> shift,
+and that a top-1 drop smaller than the control's own seed-to-seed range would mean the
+rule was never stressed. <strong>Only one of four shifted conditions cleared that bar</strong>
+(crowded dark→light, drop 0.109 against a control seed range of 0.106). So the shift
+question is <em>unanswered</em>, not answered.</p>
+<p>Without that line written down first, "three of four shifted conditions behaved" was
+an available and false story. The control also held exactly as specified: the varied arm's
+headroom was <span class="num">0.000</span> in all 40 runs, asserted in code rather than
+interpreted, since one label per group makes coarse accuracy identical to fine by
+construction.</p>
+</div>
+
+<div class="note warn">
+<span class="key">One column, two jobs</span>
+<p><code>cluster</code> is used both to keep a subject's photographs on one side of a
+split <em>and</em> as the bootstrap resampling unit. Here the natural split unit is the
+near-duplicate clique (~45–290 per arm), which gives tight intervals while condition
+difficulty — the dominant variance component — goes unresampled. Every figure above
+therefore reports a second interval resampling the six <em>conditions</em>. Quoting the
+clique interval alone would understate the uncertainty severalfold.</p>
+</div>
+</section>
+
+<section id="s12">
+<div class="sh"><p class="eyebrow">12</p><h2>Safety: per-pair vs. union</h2></div>
 
 <p>When being wrong is expensive, the natural instinct is to enumerate the dangerous
 confusions and measure each. That is necessary and <em>not sufficient</em>, and the gap
@@ -608,8 +892,8 @@ consequential are checked against a bar fixed in advance, and the card refuses t
 certify a model that exceeds it.</p>
 </section>
 
-<section id="s11">
-<div class="sh"><p class="eyebrow">11</p><h2>The size/accuracy frontier</h2></div>
+<section id="s13">
+<div class="sh"><p class="eyebrow">13</p><h2>The size/accuracy frontier</h2></div>
 
 <p>How much does a smaller encoder cost as the label set narrows? 530-species catalogue,
 frozen encoders, 15 draws per point, random (mostly cross-group) subsets.</p>
@@ -668,8 +952,8 @@ mattered.</p>
 </div>
 </section>
 
-<section id="s12">
-<div class="sh"><p class="eyebrow">12</p><h2>Measuring contamination</h2></div>
+<section id="s14">
+<div class="sh"><p class="eyebrow">14</p><h2>Measuring contamination</h2></div>
 
 <p>BioCLIP-2 trains on iNaturalist via GBIF, and the evaluation images are iNaturalist.
 Every number was therefore hedged as an upper bound. That hedge is now measured.</p>
@@ -703,13 +987,13 @@ reversed the sign and shrank the effect to noise.</p>
 <p><strong>The drop belongs to the small encoder, and it is not memorisation.</strong>
 MobileCLIP2-S2 loses 2.3pp with a CI excluding zero — the largest drop, from the encoder
 <em>least</em> likely to have trained on iNaturalist. It is sensitivity to drift, and it
-is the same pattern as the image-source change in §11 where S2 lost 9.4pp and BioCLIP-2
+is the same pattern as the image-source change in §13 where S2 lost 9.4pp and BioCLIP-2
 lost 0.2pp. Two independent measurements agree: <em>a small encoder's accuracy is not
 merely lower, it is less durable.</em></p>
 </section>
 
-<section id="s13">
-<div class="sh"><p class="eyebrow">13</p><h2>Failure modes and open questions</h2></div>
+<section id="s15">
+<div class="sh"><p class="eyebrow">15</p><h2>Failure modes and open questions</h2></div>
 
 <h3>Known failure modes</h3>
 <ul>
@@ -721,6 +1005,13 @@ left <em>outside</em> the set have no correct answer available. On one build, on
 were answered and 59.6% of those were correct — against 98.1% on in-set rows.</li>
 <li><strong>Group answers can be vacuous.</strong> §9. The flat 0.5 utility is the
 proximate cause.</li>
+<li><strong>Retreat can be silently swallowed by declining.</strong> §11. At a high assumed
+out-of-set rate or a weak encoder, <code>t_group</code> rises into the band where group
+answers live and 59–93% of would-be retreats become declines. Headroom does not see this,
+so the <span class="num">1.8 ×</span> rule over-promises by up to 70× at fixed headroom.</li>
+<li><strong>One <code>cluster</code> column serves two purposes.</strong> Splitting wants
+the finest honest subject grouping; the bootstrap wants the coarsest meaningful one. When
+they differ, the reported interval is the split unit's and can be far too tight.</li>
 <li><strong>The reference pool is a floor.</strong> Sibling warnings check against a
 bundled 499-binomial list. A group whose relatives that list never included looks safer
 than it is — and at a pool of thousands the check <em>inverts</em>, since nearly every
@@ -730,11 +1021,27 @@ Ranking by embedding distance is the fix.</li>
 
 <h3>Open questions</h3>
 <ol>
-<li><strong>Domain shift.</strong> The only untested axis. Contamination is measured and
-small; the trap generalises across kingdoms; but every number in both repos comes from
-iNaturalist photographs. Nobody has pointed a different camera at a plant and asked.</li>
+<li><strong>Domain shift — still open, and one attempt did not settle it.</strong>
+Contamination is measured and small; the trap generalises across kingdoms; but every plant
+number in both repos comes from iNaturalist photographs, and nobody has pointed a
+different camera at a plant and asked. The dermatology population shift in §11 was built
+to attack the general version of this and produced a declared null: the axis moved
+accuracy by less than seed noise in three of four conditions. A genuinely different
+acquisition source — a second atlas, or consumer phone photographs against clinical ones —
+remains the experiment worth running. The obvious candidate, splitting Fitzpatrick17k
+across its two source atlases, is currently unrunnable: DermaAmin supplies 12,631 of its
+16,577 rows and that host is suspended.</li>
+<li><strong>An operating-point term in the retreat rule.</strong> §11 shows group share is
+jointly determined by headroom and <span class="num">p<sub>ood</sub></span>. A two-variable
+rule is the obvious next form, and it needs arms that vary both — the 1,409 existing arms
+were nearly all fitted at <span class="num">p<sub>ood</sub> = 0.2</span>.</li>
 <li><strong>A group-informativeness utility term.</strong> Would fix the vacuous-group
 degeneracy. Must be declared before being fitted.</li>
+<li><strong>A <code>--holdout-column</code> in the tool.</strong> §11's experiment required
+monkeypatching <code>make_splits</code>, because narrowcast assigns calibration and test at
+random — everywhere it had been applied, both came from one population. Making the split
+column declarable would let any user ask "how does this behave on a population I did not
+calibrate on" without patching the library.</li>
 <li><strong>Core ML export of PlantCLEF2024.</strong> The 38.6 ms is MPS. 518px is a very
 different graph on the Neural Engine, and int4 per-grouped-channel is known to be
 <em>silently wrong</em> on the Metal GPU backend in this stack — returning a plausible
@@ -751,11 +1058,16 @@ data sources.</li>
 <a href="https://github.com/semajyllek/narrowcast">narrowcast</a>; every measurement
 reproducible from <a href="https://github.com/semajyllek/plantid">plantid</a> — see
 <code>EMBEDDED_FINDINGS.md</code>, <code>OREGON_SAFETY_FINDINGS.md</code>,
-<code>BIRDS_FINDINGS.md</code>, <code>CONTAMINATION_FINDINGS.md</code> and the two
-pre-registrations.</p>
+<code>BIRDS_FINDINGS.md</code>, <code>HEADROOM_FINDINGS.md</code>,
+<code>CONTAMINATION_FINDINGS.md</code> and the pre-registrations. §11 is reproducible from
+<a href="https://github.com/semajyllek/narrowcast-derm">narrowcast-derm</a>, whose
+<code>PREREGISTRATION.md</code> was committed before any head was fitted and whose
+<code>ood_sweep.py</code> produces the table directly.</p>
 <p>Two claims in this document are retracted versions of earlier ones, marked in place
-rather than deleted: the frontier's transfer across image sources (§11) and the direction
-of the contamination confound (§12).</p>
+rather than deleted: the frontier's transfer across image sources (§13) and the direction
+of the contamination confound (§14). A third is qualified rather than retracted: the
+<span class="num">1.8 × headroom</span> rule of §10 holds as a floor only at a stated
+operating point, per §11.</p>
 <p>Nothing here is verification. Do not eat anything on the basis of a model built this
 way.</p>
 </footer>
