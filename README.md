@@ -218,7 +218,7 @@ pip install -e '.[encode]'  # adds torch/open_clip to turn images into vectors
 
 ## Provenance
 
-Extracted from [plantid](https://github.com/semajyllek/plantid). Every claim on
+Extracted from [plantid](https://github.com/semajyllek/narrowcast-plantid). Every claim on
 this page is backed by a measurement there — see `EMBEDDED_FINDINGS.md`,
 `OREGON_SAFETY_FINDINGS.md`, `BIRDS_FINDINGS.md` and `CONTAMINATION_FINDINGS.md`,
 including two in-place retractions of earlier versions of these same claims.

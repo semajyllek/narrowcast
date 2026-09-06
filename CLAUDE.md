@@ -3,7 +3,7 @@
 A small classifier over a narrow label set, and the truth about how it will fail.
 Public, MIT, pip-installable, 65 tests, CI on 3.10/3.12/3.13.
 
-Extracted from [plantid](https://github.com/semajyllek/plantid), which remains
+Extracted from [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid), which remains
 the research record — **every number in the README traces to a findings doc
 there**, and that is where new measurements belong.
 
@@ -13,7 +13,7 @@ there**, and that is where new measurements belong.
 framework.** The encoder is always frozen and always someone else's. What gets
 built is a logistic head plus two thresholds — ~40 KB against an encoder of
 17.9–152 MB. Personalisation is the head; nothing here trains a backbone, and
-`PRUNE_FINDINGS.md` in plantid is the measurement saying it should not try.
+`PRUNE_FINDINGS.md` in narrowcast-plantid is the measurement saying it should not try.
 
 ## Why it exists
 
@@ -91,7 +91,7 @@ So no report ever prints coverage without the label-level share beside it.
 `build` measures **headroom** (coarse-rank minus label-rank accuracy, on the
 in-catalogue *calibration* rows) and the full three-way split of in-list
 behaviour: `label_share`, `group_share`, `decline_share`. Established in
-plantid's `HEADROOM_FINDINGS.md` over 1,409 arms — headroom predicts group-answer
+narrowcast-plantid's `HEADROOM_FINDINGS.md` over 1,409 arms — headroom predicts group-answer
 share at CV R² 0.883 against 0.362 for label accuracy alone.
 
 **`plan` cannot do this, and an earlier version of this file wrongly said it
