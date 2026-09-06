@@ -69,6 +69,20 @@ So no report ever prints coverage without the label-level share beside it.
 
 - **Domain shift.** Every number comes from iNaturalist photos, one text corpus,
   two audio corpora. Nobody has pointed a different camera at anything.
-- **Headroom hypothesis** — see `narrowcast-kws`. Would give the crowded-set
-  warning a predictive rule instead of a heuristic.
+- **Adopt the headroom rule.** No longer a hypothesis: plantid's
+  `HEADROOM_FINDINGS.md` measures it over 1,409 arms — headroom (coarse-rank
+  accuracy minus fine-rank accuracy) predicts group-answer share at CV R² 0.883,
+  against 0.362 for fine accuracy alone, and generalises off-domain at MAE 0.033.
+  Roughly `group_share ≈ 1.8 × headroom`, computable on the same calibration
+  split that fits the thresholds.
+
+  `plan`'s crowded-set warning still fires on label-set *structure*. It could
+  fire on measured headroom instead, which predicts the mechanism rather than a
+  proxy for it. Deliberately **not** changed by the run that measured it —
+  adopting it is a separate act, and needs a test.
+
+  Caveat to carry into any such change: headroom predicts *retreat*, not *harm*.
+  Group answers can come out of declines (coverage inflates, quality holds) or
+  out of label answers (quality collapses). So the label-level share stays
+  mandatory in every report regardless.
 - Not on PyPI. `pip install /path/to/narrowcast` for now.
