@@ -43,6 +43,9 @@ section{margin-top:66px;scroll-margin-top:20px}
 .toc ol{margin:0;padding-left:20px;columns:2;column-gap:34px}
 .toc li{margin:5px 0;break-inside:avoid}
 .toc a{text-decoration:none} .toc a:hover{text-decoration:underline}
+.toc .hint{margin:0 0 12px;font:650 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+ letter-spacing:.12em;text-transform:uppercase;color:var(--ink3)}
+section#notation{margin-top:44px}
 .scroll{overflow-x:auto;margin:20px 0;border:1px solid var(--rule);border-radius:8px}
 table{border-collapse:collapse;width:100%;font-size:14.5px;min-width:520px}
 th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--rule);white-space:nowrap}
@@ -127,8 +130,7 @@ imaging). Every formula below is transcribed from those sources.</p>
 </div>
 
 <div class="toc">
-<p style="margin:0 0 12px;font:650 11px/1 ui-monospace,monospace;letter-spacing:.12em;
-text-transform:uppercase;color:var(--ink3)">Start here → <a href="#notation">Notation and terms</a></p>
+<p class="hint">Start here → <a href="#notation">Notation and terms</a></p>
 <ol>
 <li><a href="#s1">The problem</a></li>
 <li><a href="#s2">Architecture: what is actually built per user</a></li>
@@ -150,7 +152,7 @@ text-transform:uppercase;color:var(--ink3)">Start here → <a href="#notation">N
 </ol>
 </div>
 
-<section id="notation" style="margin-top:44px">
+<section id="notation">
 <div class="sh"><p class="eyebrow">Reference</p><h2>Notation and terms</h2></div>
 
 <p>Everything below is defined once here and used consistently. The two thresholds and
