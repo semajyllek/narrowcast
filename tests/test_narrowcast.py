@@ -558,3 +558,131 @@ def test_binomial_labels_are_unaffected_by_the_fix():
     from narrowcast.labels import group_of
     assert group_of("Sedum acre") == "Sedum"
     assert group_of("Larus occidentalis") == "Larus"
+
+
+# ---- headroom: the quantity that predicts retreat to the group -------------
+
+def _cascade_frame(n_labels=8, per_label=6, n_bg=40, label_ok=True, group_ok=True):
+    """A frame shaped like `score_frame`'s output, with the two rank outcomes
+    controllable independently. That independence is the whole point: headroom is
+    coarse-rank accuracy minus fine-rank accuracy, and nothing else may move it."""
+    rng = np.random.default_rng(0)
+    lab = [f"G{i // 2} sp{i}" for i in range(n_labels) for _ in range(per_label)]
+    rows = {
+        "label_conf": rng.uniform(0.4, 0.99, len(lab)),
+        "group_conf": rng.uniform(0.4, 0.99, len(lab)),
+        "label_ok": np.full(len(lab), label_ok),
+        "group_ok": np.full(len(lab), group_ok),
+        "in_catalog": np.full(len(lab), True),
+        "bucket": ["in_catalog"] * len(lab),
+        "label": lab,
+        "group": [l.split()[0] for l in lab],
+    }
+    bg = {
+        "label_conf": rng.uniform(0.0, 0.5, n_bg),
+        "group_conf": rng.uniform(0.0, 0.5, n_bg),
+        "label_ok": np.full(n_bg, False),
+        "group_ok": np.full(n_bg, False),
+        "in_catalog": np.full(n_bg, False),
+        "bucket": ["distant_ood"] * n_bg,
+        "label": [f"bg{i}" for i in range(n_bg)],
+        "group": [f"bg{i}" for i in range(n_bg)],
+    }
+    return pd.concat([pd.DataFrame(rows), pd.DataFrame(bg)], ignore_index=True)
+
+
+def test_headroom_is_the_gap_between_the_two_ranks():
+    """Coarse right where fine is wrong is headroom 1.0; the value must not depend
+    on which half `make_splits` happened to choose."""
+    m = build.fit_and_measure(_cascade_frame(label_ok=False, group_ok=True), p_ood=0.2)
+    assert m["calib_fine"] == pytest.approx(0.0)
+    assert m["calib_coarse"] == pytest.approx(1.0)
+    assert m["headroom"] == pytest.approx(1.0)
+
+
+def test_headroom_is_zero_when_the_group_rank_adds_nothing():
+    """One label per group -- a group answer *is* a label answer, so no retreat is
+    possible and none should be reported. This is the varied arm in every
+    published table (plantid HEADROOM_FINDINGS.md, P1)."""
+    m = build.fit_and_measure(_cascade_frame(label_ok=True, group_ok=True), p_ood=0.2)
+    assert m["headroom"] == pytest.approx(0.0)
+
+
+def test_the_three_in_list_shares_partition():
+    """label / group / decline are the whole of the cascade's in-list behaviour.
+    The card reasons about where answers went, so they must actually sum."""
+    m = build.fit_and_measure(_cascade_frame(label_ok=False, group_ok=True), p_ood=0.2)
+    total = m["label_share"] + m["group_share"] + m["decline_share"]
+    assert total == pytest.approx(1.0)
+
+
+def test_headroom_is_measured_on_calibration_not_test():
+    """It has to be usable before the test numbers are trusted, and it must be a
+    property of the label set rather than of the thresholds."""
+    df = _cascade_frame(label_ok=False, group_ok=True)
+    a = build.fit_and_measure(df, p_ood=0.2)
+    b = build.fit_and_measure(df, p_ood=0.6)      # different thresholds entirely
+    assert a["headroom"] == pytest.approx(b["headroom"])
+
+
+# ---- the card must not assert where the answers went ----------------------
+
+def _retreat_manifest(label_share, group_share, decline_share, headroom=0.0):
+    m = _manifest(label_share)
+    m["metrics"].update({"group_share": group_share, "decline_share": decline_share,
+                         "headroom": headroom})
+    return m
+
+
+def test_card_names_group_retreat_when_that_is_what_happened():
+    out = card.render(_retreat_manifest(0.30, group_share=0.60, decline_share=0.10))
+    assert "60.0% are answered at group" in out
+    assert "because* of those group answers" in out
+
+
+def test_card_says_declining_when_the_model_is_declining():
+    """The card used to assert 'the rest are answered at group' while measuring no
+    such thing. On a model that declines instead, that sentence was simply false."""
+    out = card.render(_retreat_manifest(0.30, group_share=0.05, decline_share=0.65))
+    assert "65.0% are declined outright" in out
+    assert "mostly declining rather than retreating" in out
+
+
+def test_card_reports_benign_retreat_that_cost_nothing():
+    """Retreat is not harm: group answers drawn from declines inflate coverage while
+    quality holds (the kws-acoustic case), and that was invisible before. Gated on
+    *measured* retreat, not on headroom, which only predicts it."""
+    out = card.render(_retreat_manifest(0.75, group_share=0.20, decline_share=0.05,
+                                        headroom=0.15))
+    assert "retreats to the group, and it has not cost you" in out
+    assert "15.0pp" in out
+
+
+def test_card_stays_quiet_when_there_is_no_retreat():
+    out = card.render(_retreat_manifest(0.85, group_share=0.02, decline_share=0.13,
+                                        headroom=0.01))
+    assert "retreats to the group" not in out
+    assert "Read the label-level share" not in out
+
+
+def test_card_renders_a_bundle_built_before_headroom_existed():
+    """Old manifests carry none of these keys; the card must degrade, not raise."""
+    out = card.render(_manifest(0.31))
+    assert "Read the label-level share, not the coverage" in out
+    assert "n/a" in out
+
+
+def test_absent_bucket_does_not_lower_the_stated_prevalence():
+    """`deployment_weights` leaves an absent bucket's share unclaimed and
+    renormalises. A source with no in-pool relatives has no near_ood, so
+    `--ood-rate 0.2` scored at an effective 0.145 while the card printed "an
+    assumed 20.0% out-of-list rate"."""
+    df = _cascade_frame(label_ok=False, group_ok=True)   # in_catalog + distant_ood only
+    assert "near_ood" not in set(df["bucket"])
+    m = build.fit_and_measure(df, p_ood=0.2)
+    # per_bucket answered rates are unweighted, so check the weighting directly
+    w = cascade.deployment_weights(df["bucket"].to_numpy(), p_ood=0.2,
+                                   ood_mix={"distant_ood": 1.0})
+    inc = df["in_catalog"].to_numpy()
+    assert w[~inc].sum() / w.sum() == pytest.approx(0.2)
+    assert m["p_ood"] == 0.2

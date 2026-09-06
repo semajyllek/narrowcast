@@ -29,6 +29,15 @@ def _ci(metrics, key):
 
 HAZARD_BAR = 0.01   # declared, not tuned: see OREGON_SAFETY_FINDINGS.md
 
+# Declared from the shape of the measured space, not tuned to a metric. Across
+# plantid's 1,409 arms (HEADROOM_FINDINGS.md), retreat and harm travel together:
+# of arms answering >=18% of in-list observations at group, 99.1% also have a
+# label-level share under 0.6, and above 35% retreat *none* keeps a healthy share.
+# Benign retreat -- coverage bought without costing quality -- lives in a narrow
+# band, so this gates on measured retreat rather than on headroom, which only
+# predicts it. Below 0.10 retreat is negligible and the card stays quiet.
+GROUP_RETREAT_BAR = 0.10
+
 
 def _hazard_section(hz: dict) -> list:
     """The union rate, reported as a gate rather than a statistic.
@@ -85,6 +94,70 @@ def _hazard_section(hz: dict) -> list:
     return L
 
 
+def _retreat_section(m: dict, comp: dict) -> list:
+    """Where the non-label answers went, and whether that cost anything.
+
+    The card used to say a low label-level share meant "the rest are answered at
+    group". It measured no such thing, and it can be false: the model may be
+    declining instead. plantid's HEADROOM_FINDINGS.md separates the two shadows --
+    group answers drawn from declines inflate coverage while quality holds, group
+    answers drawn from label answers collapse quality. Same mechanism, opposite
+    consequences, so the card reports which one happened rather than assuming.
+
+    Headroom predicts *retreat*, not *harm*, which is why the label-level share
+    stays the headline and this section never replaces it.
+    """
+    share, group, decline = (m.get("label_share"), m.get("group_share"),
+                             m.get("decline_share"))
+    headroom = m.get("headroom")
+    example = next(iter(comp.get("crowded_groups") or {}), "group")
+    out = []
+
+    if share is not None and share < 0.6:
+        if group is not None and decline is not None:
+            # Which pool the missing label answers actually went to.
+            where = (f"{_pct(group)} are answered at group and {_pct(decline)} are "
+                     f"declined outright"
+                     if group >= decline else
+                     f"{_pct(decline)} are declined outright and only {_pct(group)} "
+                     f"are answered at group")
+            cost = (f"Coverage and precision look healthy here *because* of those "
+                    f"group answers, not despite them."
+                    if group is not None and group >= 0.2 else
+                    f"This model is mostly declining rather than retreating, so "
+                    f"coverage is paying the price directly.")
+        else:
+            where, cost = "the rest are answered at group or declined", ""
+        out += [
+            f"> **Read the label-level share, not the coverage.** This model names "
+            f"a label on only {_pct(share)} of in-list observations; {where}. "
+            f"Because your list is group-crowded, a group answer may narrow "
+            f"nothing — \"it is a {example}\" when most of your list is that "
+            f"group. {cost}".rstrip(),
+            "",
+        ]
+    elif group is not None and group >= GROUP_RETREAT_BAR:
+        # The benign shadow, invisible to this card until now: the list retreats
+        # to the group appreciably and quality held anyway. Rare -- see the bar's
+        # note -- which is exactly why it is worth naming when it happens, rather
+        # than letting the reader infer harm from the retreat.
+        why = (f" Coarse accuracy exceeds label accuracy by {100 * headroom:.1f}pp "
+               f"on the calibration split, which is what makes retreating "
+               f"attractive to the cascade." if headroom else "")
+        out += [
+            f"> **This list retreats to the group, and it has not cost you.** "
+            f"{_pct(group)} of in-list observations are answered at group rather "
+            f"than at a label, yet the label-level share is still {_pct(share)} — "
+            f"so those group answers came out of what would otherwise have been "
+            f"declines, not out of label answers.{why} Coverage is higher than it "
+            f"would be without them and quality is unharmed. Treat it as a "
+            f"standing risk rather than a problem: the same retreat on a harder "
+            f"list is what collapses the label-level share.",
+            "",
+        ]
+    return out
+
+
 def render(manifest: dict) -> str:
     m = manifest["metrics"]
     comp = manifest["composition"]
@@ -112,27 +185,19 @@ def render(manifest: dict) -> str:
         f"{_ci(m, 'precision')} |",
         f"| **Label-level share** — in-list observations named to labels | "
         f"**{_pct(m['label_share'])}** | {_ci(m, 'label_share')} |",
+        f"| Group-level share — in-list observations answered at group only | "
+        f"{_pct(m.get('group_share'))} | {_ci(m, 'group_share')} |",
         f"| Closed-set top-1 — accuracy when the plant is on your list | "
         f"{_pct(m['closed_set_top1'])} | {_ci(m, 'closed_set_top1')} |",
         "",
         f"Intervals are bootstrapped over **labels**, not rows, because "
-        f"observations of one labels are not independent. This model rests on "
+        f"observations of one label are not independent. This model rests on "
         f"{m.get('n_label_clusters', '?')} labels in the test half, so they are "
         f"wide — that width is a fact about your list, not a formatting choice.",
         "",
     ]
 
-    share = m.get("label_share")
-    if share is not None and share < 0.6:
-        L += [
-            f"> **Read the label-level share, not the coverage.** This model names a "
-            f"labels on only {_pct(share)} of in-list observations; the rest are "
-            f"answered at group. Because your list is group-crowded, a group answer "
-            f"may narrow nothing — \"it is a {next(iter(comp['crowded_groups']), 'group')}\" "
-            f"when most of your list is that group. Coverage and precision look "
-            f"healthy here *because* of those group answers, not despite them.",
-            "",
-        ]
+    L += _retreat_section(m, comp)
 
     L += _hazard_section(m.get("hazard") or {})
 

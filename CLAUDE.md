@@ -64,25 +64,48 @@ So no report ever prints coverage without the label-level share beside it.
 - BSD `sed` does not support `\b`, which silently half-completed a bulk rename.
 - `git merge -F -` does not read stdin; it fails and a following `push` succeeds
   as a no-op.
+- **`deployment_weights` renormalises around an absent bucket.** A source with no
+  in-pool relatives has no `near_ood`, so its 0.32 share went unclaimed and
+  `--ood-rate 0.2` scored at an effective **0.145** — while the card printed "an
+  assumed 20.0% out-of-list rate". `fit_and_measure` now restricts the mix to the
+  buckets actually present, per side. Pinned by a test.
 
 ## Open
 
 - **Domain shift.** Every number comes from iNaturalist photos, one text corpus,
   two audio corpora. Nobody has pointed a different camera at anything.
-- **Adopt the headroom rule.** No longer a hypothesis: plantid's
-  `HEADROOM_FINDINGS.md` measures it over 1,409 arms — headroom (coarse-rank
-  accuracy minus fine-rank accuracy) predicts group-answer share at CV R² 0.883,
-  against 0.362 for fine accuracy alone, and generalises off-domain at MAE 0.033.
-  Roughly `group_share ≈ 1.8 × headroom`, computable on the same calibration
-  split that fits the thresholds.
+*(The headroom rule is adopted — see "What the card knows" below.)*
 
-  `plan`'s crowded-set warning still fires on label-set *structure*. It could
-  fire on measured headroom instead, which predicts the mechanism rather than a
-  proxy for it. Deliberately **not** changed by the run that measured it —
-  adopting it is a separate act, and needs a test.
+## What the card knows about retreat
 
-  Caveat to carry into any such change: headroom predicts *retreat*, not *harm*.
-  Group answers can come out of declines (coverage inflates, quality holds) or
-  out of label answers (quality collapses). So the label-level share stays
-  mandatory in every report regardless.
+`build` measures **headroom** (coarse-rank minus label-rank accuracy, on the
+in-catalogue *calibration* rows) and the full three-way split of in-list
+behaviour: `label_share`, `group_share`, `decline_share`. Established in
+plantid's `HEADROOM_FINDINGS.md` over 1,409 arms — headroom predicts group-answer
+share at CV R² 0.883 against 0.362 for label accuracy alone.
+
+**`plan` cannot do this, and an earlier version of this file wrongly said it
+could.** `cmd_plan` takes a list of label strings; it never loads an image, a
+vector or a fitted head, and `projection` interpolates a shipped grid. Headroom
+needs a fitted head and a calibration split, which exist only inside
+`fit_and_measure`. `plan`'s warning is structural and says so; the card's is
+measured.
+
+- **Headroom predicts *retreat*, not *harm*.** Group answers come out of
+  declines (coverage inflates, quality holds) or out of label answers (quality
+  collapses). The card reports which, instead of asserting — it used to say "the
+  rest are answered at group" while measuring no such thing, which is false on a
+  model that is declining.
+- **The card gates on measured retreat, not on headroom.** Post-fit the
+  observation is in hand, so gating on its predictor would be backwards.
+  `GROUP_RETREAT_BAR = 0.10`, declared from the shape of the measured space: of
+  arms retreating on ≥18% of in-list observations, 99.1% also have a label-level
+  share under 0.6, and above 35% retreat *none* stays healthy. Benign retreat is
+  real but narrow.
+- The label-level share stays the headline regardless.
+
+## Open
+
+- **Domain shift.** Every number comes from iNaturalist photos, one text corpus,
+  two audio corpora. Nobody has pointed a different camera at anything.
 - Not on PyPI. `pip install /path/to/narrowcast` for now.

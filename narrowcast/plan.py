@@ -82,9 +82,14 @@ def make_plan(chosen: list[str], budget_mb: float | None = None,
             f"{sum(crowded.values())} of your {comp['n_labels']} labels share a "
             f"group with another: {worst}",
             f"Projected label-level answers: {_fmt_pct(proj['label_share'])} of "
-            f"in-catalogue observations. The rest resolve to group, which on a "
-            f"group-crowded list may not narrow anything. Coverage and precision "
-            f"will look good regardless -- read the labels share instead.",
+            f"in-catalogue observations. The rest resolve to group or are "
+            f"declined, and a group answer on a group-crowded list may not narrow "
+            f"anything. Coverage and precision will look good regardless -- read "
+            f"the label share instead.\n"
+            f"      This is a warning about a *risk*, from structure alone. "
+            f"Whether it fires is decided by headroom -- coarse accuracy minus "
+            f"label accuracy -- which cannot be known until a head is fitted. "
+            f"`build` measures it and the card reports it.",
         ))
 
     outside = comp["outside_siblings"]

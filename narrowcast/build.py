@@ -259,15 +259,48 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     if cal.empty or te.empty:
         raise ValueError("calibration or test split is empty; too few observations")
 
-    w_cal = deployment_weights(cal["bucket"].to_numpy(), p_ood=p_ood, ood_mix=OOD_MIX)
+    # `deployment_weights` divides each bucket's share by the sum over the *whole*
+    # mix, so a bucket that is absent leaves its share unclaimed and the weighting
+    # renormalises to a lower effective prevalence than the caller asked for. A
+    # source with no in-pool relatives has no near_ood bucket, and `--ood-rate 0.2`
+    # then silently scored at 0.145 -- while the card printed "an assumed 20.0%
+    # out-of-list rate". Restricting the mix to the buckets actually present, per
+    # side, makes the stated prevalence the real one.
+    def _mix(sub):
+        present = {b: s for b, s in OOD_MIX.items() if (sub["bucket"] == b).any()}
+        return present or OOD_MIX
+
+    w_cal = deployment_weights(cal["bucket"].to_numpy(), p_ood=p_ood, ood_mix=_mix(cal))
     (tg, ts), _ = fit_thresholds(
         cal["label_conf"].to_numpy(), cal["group_conf"].to_numpy(),
         cal["label_ok"].to_numpy(), cal["group_ok"].to_numpy(),
         cal["in_catalog"].to_numpy(), sample_weight=w_cal,
     )
 
+    # Headroom -- coarse-rank accuracy minus fine-rank accuracy -- governs whether
+    # the cascade retreats to the group rank at all (plantid's
+    # HEADROOM_FINDINGS.md: CV R^2 0.883 over 1,409 arms, against 0.362 for fine
+    # accuracy alone; group_share ~= 1.8 x headroom). These are the same two
+    # arrays `fit_thresholds` just consumed, and they were discarded until now.
+    #
+    # Measured on the CALIBRATION half, so it is a property of the label set and
+    # encoder rather than of the thresholds those metrics are scored under, and
+    # restricted to in-catalogue rows because a group answer for a background row
+    # is a rejection outcome, not a rank-retreat one.
+    #
+    # In-catalogue rows all carry the identical deployment weight
+    # ((1-p_ood)/n_in, see cascade.deployment_weights), so weighting this mean
+    # would change nothing. It is left unweighted deliberately.
+    cal_inc = cal["in_catalog"].to_numpy()
+    if cal_inc.any():
+        calib_fine = float(cal["label_ok"].to_numpy()[cal_inc].mean())
+        calib_coarse = float(cal["group_ok"].to_numpy()[cal_inc].mean())
+        headroom = calib_coarse - calib_fine
+    else:
+        calib_fine = calib_coarse = headroom = None
+
     lv = decide(te["label_conf"].to_numpy(), te["group_conf"].to_numpy(), tg, ts)
-    w = deployment_weights(te["bucket"].to_numpy(), p_ood=p_ood, ood_mix=OOD_MIX)
+    w = deployment_weights(te["bucket"].to_numpy(), p_ood=p_ood, ood_mix=_mix(te))
     answered = lv != DECLINE
     correct = ((lv == LABEL) & te["label_ok"].to_numpy()) | \
               ((lv == GROUP) & te["group_ok"].to_numpy())
@@ -294,6 +327,7 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
         "coverage": _ci(w * answered, w, clusters),
         "precision": _ci(w * answered * correct, w * answered, clusters),
         "label_share": _ci((lv == LABEL) & inc, inc * ones, clusters),
+        "group_share": _ci((lv == GROUP) & inc, inc * ones, clusters),
         "closed_set_top1": _ci(te["label_ok"].to_numpy() & inc, inc * ones, clusters),
     }
 
@@ -303,6 +337,13 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
         "precision": float(w[answered & correct].sum() / w[answered].sum())
         if answered.any() else None,
         "label_share": float((lv[inc] == LABEL).mean()) if inc.any() else None,
+        # The other two thirds of the same three-way split. Without them a report
+        # cannot tell retreat to the group from declining, and the card asserted
+        # the former while measuring neither.
+        "group_share": float((lv[inc] == GROUP).mean()) if inc.any() else None,
+        "decline_share": float((lv[inc] == DECLINE).mean()) if inc.any() else None,
+        "calib_fine": calib_fine, "calib_coarse": calib_coarse,
+        "headroom": headroom,
         "closed_set_top1": float(te["label_ok"].to_numpy()[inc].mean()) if inc.any() else None,
         "ci": ci,
         "n_label_clusters": int(len(set(clusters[inc]))),
