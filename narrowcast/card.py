@@ -158,6 +158,93 @@ def _retreat_section(m: dict, comp: dict) -> list:
     return out
 
 
+def _unmeasured_lines(oc: dict) -> list:
+    """Labels with no deployment-origin rows *at all* cannot be scored.
+
+    They are the common case, not an edge case, and they are the labels most
+    exposed to the effect. Folding them into an average would understate it, and
+    omitting them would hide it, so they are counted and named.
+    """
+    n = oc.get("n_unmeasured") or 0
+    if not n:
+        return []
+    names = oc.get("labels_unmeasured") or []
+    shown = ", ".join(names[:6]) + (f" (+{n - min(6, len(names))} more)" if n > 6 else "")
+    return ["",
+            f"**{n} labels have no `{oc.get('deployment_origin')}` rows at all**, so "
+            "there is nothing to score them on. They are the most exposed to this and "
+            "the least measurable; read their accuracy as coming from a population "
+            "this build was never tested against.",
+            "",
+            f"Unmeasured: {shown}."]
+
+
+def _origin_section(oc: dict | None) -> list:
+    """What the deployment-origin data did, and to whom.
+
+    Reported per label group rather than as one number, because it is not one
+    number: the labels that got deployment-origin training rows gain and the
+    labels that did not are *worse off than if none had*. A single average hides
+    a subgroup being harmed, which is the same failure the label-level share
+    exists to prevent.
+
+    Measured, never inferred. The size is domain-dependent -- ~0 on plants once
+    the label set is narrow, 10-20 points on dermatology and keyword spotting at
+    every label count tried -- so it cannot be read off the number of labels.
+    """
+    if not oc:
+        return []
+    dep = oc.get("deployment_origin")
+    out = ["", f"## Origin composition — deployment origin `{dep}`", ""]
+
+    if not oc.get("measurable"):
+        out.append(f"Not measured: {oc.get('why', 'nothing to compare')}.")
+        out += _unmeasured_lines(oc)
+        return out
+
+    n_lack, n_cov = oc.get("n_lacking"), oc.get("n_covered")
+    lack_d, cov_d = oc.get("lacking_delta"), oc.get("covered_delta")
+    out.append(f"**{n_lack} of {n_lack + n_cov} labels have no training data from "
+               f"`{dep}`**, the origin this model will be used against.")
+    out.append("")
+    out.append("Two heads on the same label set — one fitted on everything, one with "
+               f"every `{dep}` training row removed — scored on the same "
+               f"{oc.get('n_eval_rows')} held-out `{dep}` rows:")
+    out.append("")
+    out.append("| labels | with the data | without it | measured effect |")
+    out.append("|---|---|---|---|")
+    for name, key, n in (("have it", "covered", n_cov), ("lack it", "lacking", n_lack)):
+        w, wo = oc.get(f"{key}_with"), oc.get(f"{key}_without")
+        d = oc.get(f"{key}_delta")
+        if w is None or wo is None:
+            continue
+        out.append(f"| {name} ({n}) | {w:.3f} | {wo:.3f} | "
+                   f"{'—' if d is None else f'{d:+.3f}'} |")
+    out.append("")
+
+    if lack_d is not None and lack_d < -0.01:
+        out.append(f"**The {n_lack} labels without `{dep}` data are {abs(lack_d):.3f} "
+                   "worse than if no label had it.** One multinomial means one "
+                   f"argmax: `{dep}` rows move the boundaries of the labels that got "
+                   "them, and a label represented only by the other origin loses ties "
+                   "it used to win.")
+        out.append("")
+        names = oc.get("labels_lacking") or []
+        if names:
+            shown = ", ".join(names[:6])
+            more = f" (+{n_lack - min(6, len(names))} more)" if n_lack > 6 else ""
+            out.append(f"Affected: {shown}{more}.")
+            out.append("")
+        out.append("This does **not** shrink as the label set narrows. It tracks the "
+                   "accuracy of the build, and on two of the three domains measured it "
+                   "was undiminished at 5 labels.")
+    elif lack_d is not None:
+        out.append(f"The {n_lack} labels without `{dep}` data are not measurably worse "
+                   f"off ({lack_d:+.3f}).")
+    out += _unmeasured_lines(oc)
+    return out
+
+
 def render(manifest: dict) -> str:
     m = manifest["metrics"]
     comp = manifest["composition"]
@@ -198,6 +285,7 @@ def render(manifest: dict) -> str:
     ]
 
     L += _retreat_section(m, comp)
+    L += _origin_section(m.get("origin_cost"))
 
     L += _hazard_section(m.get("hazard") or {})
 

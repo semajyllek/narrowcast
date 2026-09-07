@@ -9,8 +9,8 @@ making them.
 Three ways in, in increasing order of "I have already done the work":
 
     --images DIR          DIR/<label>/*.jpg
-    --manifest FILE       parquet/csv with columns: label, path [, group, cluster]
-    --embeddings FILE     .npz with arrays: descriptor, label [, group, cluster]
+    --manifest FILE       parquet/csv with columns: label, path [, group, cluster, origin]
+    --embeddings FILE     .npz with arrays: descriptor, label [, group, cluster, origin]
 
 `cluster` is the unit that must not straddle a train/test split -- several
 photographs of one individual, one specimen, one manufacturing run. Supply it
@@ -19,6 +19,14 @@ independent, which is the assumption `CLAUDE.md`'s first convention exists to
 warn about. `group` is the coarse rank the cascade can fall back to; it defaults
 to the first whitespace-delimited token of the label, which is exactly right for
 Linnaean binomials and often right elsewhere.
+
+`origin` is which acquisition source or population a row came from -- a corpus, a
+device, a skin-type band, a speaker group. It is optional and nothing requires
+it. Supply it when your rows come from more than one, because labels that have
+training rows from the *deployment* origin and labels that do not are not
+comparable, and the ones that do not are measurably worse off. `build` measures
+that cost when `--deployment-origin` names which one you will actually see; see
+`build.origin_cost`.
 """
 
 from dataclasses import dataclass, field
@@ -38,6 +46,7 @@ class Rows:
     cluster: np.ndarray
     path: np.ndarray | None = None          # None when embeddings were supplied
     descriptor: np.ndarray | None = None
+    origin: np.ndarray | None = None        # acquisition source / population, optional
     has_clusters: bool = True
     notes: list[str] = field(default_factory=list)
 
@@ -53,7 +62,8 @@ def default_group(label: str) -> str:
     return str(label).split()[0] if str(label).split() else str(label)
 
 
-def _finish(label, path=None, descriptor=None, group=None, cluster=None, notes=None) -> Rows:
+def _finish(label, path=None, descriptor=None, group=None, cluster=None, notes=None,
+            origin=None) -> Rows:
     label = np.asarray(label, dtype=str)
     notes = list(notes or [])
     if group is None:
@@ -66,9 +76,13 @@ def _finish(label, path=None, descriptor=None, group=None, cluster=None, notes=N
         cluster = np.arange(len(label)).astype(str)
         notes.append("no cluster column supplied: every row treated as independent, "
                      "so intervals are anticonservative if several rows share a subject")
+    if origin is not None:
+        origin = np.asarray(origin, dtype=str)
+        notes.append(f"origin supplied: {len(set(origin.tolist()))} distinct "
+                     "(pass --deployment-origin to measure what it costs)")
     return Rows(label, group, np.asarray(cluster, dtype=str),
                 None if path is None else np.asarray(path, dtype=str),
-                descriptor, has_clusters, notes)
+                descriptor, origin, has_clusters, notes)
 
 
 def from_images(root) -> Rows:
@@ -89,7 +103,7 @@ def from_images(root) -> Rows:
 
 
 def from_manifest(path) -> Rows:
-    """A table with `label` and `path`, optionally `group` and `cluster`."""
+    """A table with `label` and `path`, optionally `group`, `cluster` and `origin`."""
     path = Path(path)
     df = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path)
     cols = {c.lower(): c for c in df.columns}
@@ -99,6 +113,7 @@ def from_manifest(path) -> Rows:
     return _finish(df[cols["label"]], path=df[cols["path"]],
                    group=df[cols["group"]] if "group" in cols else None,
                    cluster=df[cols["cluster"]] if "cluster" in cols else None,
+                   origin=df[cols["origin"]] if "origin" in cols else None,
                    notes=[f"{len(df)} rows from {path.name}"])
 
 
@@ -115,6 +130,7 @@ def from_embeddings(path) -> Rows:
     return _finish(label, descriptor=z["descriptor"],
                    group=z["group"] if "group" in z.files else None,
                    cluster=cluster,
+                   origin=z["origin"] if "origin" in z.files else None,
                    notes=[f"{len(z['descriptor'])} precomputed embeddings from {Path(path).name}"])
 
 

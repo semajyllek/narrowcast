@@ -720,3 +720,106 @@ def test_candidates_respect_the_budget():
     from narrowcast import cli
     got = cli._candidates(_Cfg(max_size_mb=20))
     assert "bioclip2" not in [n for n, _ in got]
+
+
+# --- origin composition ------------------------------------------------------
+#
+# The measurement exists because the size of this effect is domain-dependent and
+# cannot be inferred from the label set: ~0 on plants once K is small, 10-20
+# points on dermatology and keyword spotting at every K tried. So the tool
+# measures it rather than warning about it, and these tests pin the contract
+# rather than the number.
+
+def _origin_rows(labels, groups, origin, dim=8, seed=0, shift=0.0):
+    """Like `_rows`, but rows from origin 'B' are displaced in feature space, so
+    a head fitted without them genuinely does worse on them."""
+    rng = np.random.default_rng(seed)
+    X = np.vstack([rng.normal(hash(g) % 7, 0.3, (1, dim)) for g in groups]).astype("float32")
+    X[np.asarray(origin) == "B"] += shift
+    return sources._finish(labels, descriptor=X, group=groups, origin=origin,
+                           cluster=[f"c{i}" for i in range(len(labels))])
+
+
+def test_origin_column_is_optional_and_absent_by_default():
+    ds = build.load_rows(_rows(["a x", "b y"] * 8, ["a", "b"] * 8), "unused")
+    assert ds.origin_train is None and ds.origin_eval is None
+    assert build.origin_cost(ds, "B") is None
+
+
+def test_origin_cost_refuses_rather_than_guessing_when_nothing_to_compare():
+    labels = ["a x", "b y"] * 8
+    groups = ["a", "b"] * 8
+    ds = build.load_rows(_origin_rows(labels, groups, ["A"] * 16), "unused")
+    out = build.origin_cost(ds, "B")
+    assert out["measurable"] is False and "no training rows" in out["why"]
+
+    # every label covered -> nothing is being denied anything.  Origin must
+    # alternate *within* each label; ["A","B"]*8 against ["a x","b y"]*8 makes
+    # origin a perfect proxy for the label, which is a different situation.
+    origin = ["A" if i % 4 < 2 else "B" for i in range(16)]
+    ds2 = build.load_rows(_origin_rows(labels, groups, origin), "unused")
+    out2 = build.origin_cost(ds2, "B")
+    assert out2["measurable"] is False and out2["n_lacking"] == 0
+
+
+def test_origin_cost_measures_the_labels_denied_the_deployment_origin():
+    """One label gets no rows from the deployment origin; the report must name it
+    and score it separately from the labels that did get them. Reporting one
+    average would hide the subgroup being harmed, which is the failure the
+    label-level share exists to prevent."""
+    labels, groups, origin = [], [], []
+    for i in range(60):
+        lab = ["a x", "b y", "c z"][i % 3]
+        labels.append(lab)
+        groups.append(lab.split()[0])
+        origin.append("A" if i % 2 else "B")
+    rows = _origin_rows(labels, groups, origin, shift=1.5)
+    ds = build.load_rows(rows, "unused")
+    # 'c z' keeps its B *eval* rows but loses every B *training* row, which is
+    # the situation the measurement exists for: scoreable, and denied the data.
+    drop = (ds.y_train == "c z") & (ds.origin_train == "B")
+    ds.X_train, ds.y_train = ds.X_train[~drop], ds.y_train[~drop]
+    ds.origin_train = ds.origin_train[~drop]
+
+    out = build.origin_cost(ds, "B")
+    assert out["measurable"] is True
+    assert out["n_lacking"] == 1 and out["labels_lacking"] == ["c z"]
+    assert out["n_covered"] == 2
+    # both groups are scored, and separately
+    assert out["lacking_delta"] is not None and out["covered_delta"] is not None
+
+
+def test_card_reports_origin_cost_per_group_never_as_one_number():
+    oc = {"deployment_origin": "clinic", "measurable": True,
+          "n_lacking": 2, "n_covered": 18, "n_eval_rows": 300,
+          "labels_lacking": ["psoriasis", "lichen planus"],
+          "covered_with": 0.87, "covered_without": 0.79, "covered_delta": 0.08,
+          "lacking_with": 0.71, "lacking_without": 0.85, "lacking_delta": -0.14}
+    text = "\n".join(card._origin_section(oc))
+    assert "clinic" in text
+    assert "0.080" in text or "+0.080" in text     # the gain
+    assert "0.140" in text                          # the damage, reported beside it
+    assert "psoriasis" in text                      # named, so it can be acted on
+    assert "does **not** shrink" in text            # the K warning travels with it
+
+
+def test_card_says_nothing_when_there_is_no_origin_column():
+    assert card._origin_section(None) == []
+    assert card._origin_section({}) == []
+
+
+def test_origin_cost_counts_labels_it_cannot_score_instead_of_averaging_them_away():
+    """A label with no deployment-origin rows *at all* is the common real case and
+    the most exposed. It must be surfaced, not folded into a mean that would then
+    understate the problem."""
+    labels, groups, origin = [], [], []
+    for i in range(60):
+        lab = ["a x", "b y", "c z"][i % 3]
+        labels.append(lab)
+        groups.append(lab.split()[0])
+        origin.append("A" if lab == "c z" else ("A" if i % 2 else "B"))
+    ds = build.load_rows(_origin_rows(labels, groups, origin, shift=1.5), "unused")
+    out = build.origin_cost(ds, "B")
+    assert out["n_unmeasured"] == 1 and out["labels_unmeasured"] == ["c z"]
+    text = "\n".join(card._origin_section(out))
+    assert "c z" in text and "no `B` rows at" in text

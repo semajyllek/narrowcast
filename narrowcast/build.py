@@ -46,6 +46,7 @@ from narrowcast.labels import group_of
 
 OTHER = "__OTHER__"
 BG_TRAIN_FRAC = 0.6
+BG_ORIGIN = "__BACKGROUND__"
 OOD_MIX = {"near_ood": 0.32, "distant_ood": 0.68}
 BUNDLE_VERSION = 1
 
@@ -61,6 +62,8 @@ class Dataset:
     counts: dict
     cluster: np.ndarray          # real label per eval row, background included
     group: np.ndarray | None = None   # caller-supplied coarse rank, per eval row
+    origin_train: np.ndarray | None = None   # acquisition source per training row
+    origin_eval: np.ndarray | None = None    # ... and per eval row
 
 
 def _l2(X):
@@ -94,6 +97,9 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
     ev, truth, cluster, bucket = [X[~tr]], [rows.label[~tr]], [rows.cluster[~tr]], \
         ["in_catalog"] * int((~tr).sum())
     group = [rows.group[~tr]]
+    has_origin = rows.origin is not None
+    o_tr = [rows.origin[tr]] if has_origin else None
+    o_ev = [rows.origin[~tr]] if has_origin else None
     counts = {"in_catalog": int((~tr).sum()), "near_ood": 0, "distant_ood": 0,
               "train": int(tr.sum())}
     notes = list(rows.notes)
@@ -110,6 +116,12 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
         bucket += ["distant_ood"] * len(far)
         counts["distant_ood"] = len(far)
         counts["train"] += n
+        if has_origin:
+            # Background rows have no origin in the caller's sense; they are
+            # negatives, not members of either population, and labelling them
+            # with one would make them look like evidence about it.
+            o_tr.append(np.full(n, BG_ORIGIN))
+            o_ev.append(np.full(len(far), BG_ORIGIN))
     else:
         notes.append("no background supplied: closed-set only, the model cannot decline")
 
@@ -117,13 +129,100 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
     counts["has_clusters"] = bool(rows.has_clusters)
     return Dataset(np.vstack(Xtr), np.concatenate(ytr), pd.DataFrame(),
                    np.vstack(ev), np.concatenate(truth), np.array(bucket), counts,
-                   np.concatenate(cluster), np.concatenate(group))
+                   np.concatenate(cluster), np.concatenate(group),
+                   np.concatenate(o_tr) if has_origin else None,
+                   np.concatenate(o_ev) if has_origin else None)
 
 
 def fit_head(ds: Dataset, C: float = 10.0) -> LogisticRegression:
     return LogisticRegression(max_iter=3000, C=C, class_weight="balanced").fit(
         ds.X_train, ds.y_train
     )
+
+
+
+def origin_cost(ds: Dataset, deployment: str, C: float = 10.0) -> dict | None:
+    """What it costs a label to have no training rows from the deployment origin.
+
+    When rows carry an `origin` -- two corpora, two devices, two populations --
+    the labels that have training rows from the origin you will actually deploy
+    against and the labels that do not are not comparable. The ones that do not
+    are *worse off than if no label had them*: the head is one multinomial and
+    one argmax, so rows from the deployment origin move the boundaries of the
+    labels that got them, and a label still represented only by the other origin
+    loses ties it used to win.
+
+    This is measured, not predicted, because its size is domain-dependent and
+    nothing about the label set tells you what it will be. Two heads are fitted
+    on the same label set -- one on everything, one with every deployment-origin
+    training row removed -- and both are scored on the same held-out
+    deployment-origin rows. The difference is what that data did, to the labels
+    that got it and to the labels that did not.
+
+    Measured across three domains in the research repos: on plants the cost is
+    ~0 once the label set is small, and on dermatology and keyword spotting it is
+    10-20 points and does not shrink with label count. It tracks the accuracy of
+    the build rather than the number of labels, so **do not infer it from K**.
+
+    **A label with no deployment-origin rows at all cannot be scored here** --
+    there is nothing to score it on -- and that is the common case in practice
+    rather than an edge case. Those labels are counted and named as `unmeasured`
+    rather than quietly folded into an average that would then understate the
+    problem. What is measured is the labels that have held-out deployment-origin
+    rows but no deployment-origin training rows.
+
+    Returns None when there is no origin column at all.
+    """
+    if ds.origin_train is None or ds.origin_eval is None:
+        return None
+
+    out = {"deployment_origin": deployment, "measurable": False}
+    dep_tr = ds.origin_train == deployment
+    if not dep_tr.any():
+        return {**out, "why": f"no training rows carry origin {deployment!r}"}
+
+    labels = sorted(set(ds.y_train.tolist()) - {OTHER})
+    trained_on = set(ds.y_train[dep_tr].tolist())
+    te_dep = (ds.origin_eval == deployment) & (ds.bucket == "in_catalog")
+    have_eval = set(ds.truth[te_dep].tolist())
+
+    lacking = [l for l in labels if l not in trained_on and l in have_eval]
+    unmeasured = [l for l in labels if l not in trained_on and l not in have_eval]
+    covered = [l for l in labels if l in trained_on]
+    out.update(n_lacking=len(lacking), n_covered=len(covered),
+               n_unmeasured=len(unmeasured), labels_unmeasured=unmeasured[:12])
+
+    if not lacking:
+        why = ("every label has training rows from the deployment origin"
+               if not unmeasured else
+               "no label has both held-out rows from the deployment origin and no "
+               "training rows from it, so there is no comparison to draw")
+        return {**out, "why": why}
+    if not covered:
+        return {**out, "why": "no label has training rows from the deployment origin"}
+    if len(set(ds.y_train[~dep_tr].tolist())) < 2:
+        return {**out, "why": "removing the deployment-origin rows leaves fewer than "
+                              "two labels to fit a head on"}
+
+    without = LogisticRegression(max_iter=3000, C=C, class_weight="balanced").fit(
+        ds.X_train[~dep_tr], ds.y_train[~dep_tr])
+    with_ = fit_head(ds, C=C)
+    truth, X = ds.truth[te_dep], ds.X_eval[te_dep]
+
+    def macro(clf, group):
+        keep = np.isin(truth, list(group))
+        if not keep.any():
+            return None
+        hit = pd.Series((clf.predict(X[keep]) == truth[keep]).astype(float))
+        return float(hit.groupby(pd.Series(truth[keep])).mean().mean())
+
+    out.update(measurable=True, labels_lacking=lacking[:12],
+               n_eval_rows=int(te_dep.sum()))
+    for name, group in (("lacking", lacking), ("covered", covered)):
+        a, b = macro(without, group), macro(with_, group)
+        out[f"{name}_without"], out[f"{name}_with"] = a, b
+        out[f"{name}_delta"] = None if (a is None or b is None) else round(b - a, 4)
+    return out
 
 
 def score_frame(clf, ds: Dataset) -> pd.DataFrame:

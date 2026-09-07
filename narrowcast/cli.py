@@ -105,6 +105,13 @@ def cmd_build(args):
     frame = B.score_frame(clf, ds)
     metrics = B.fit_and_measure(frame, p_ood=args.ood_rate, hazards=hazards)
 
+    if getattr(args, "deployment_origin", None):
+        metrics["origin_cost"] = B.origin_cost(ds, args.deployment_origin)
+    elif ds.origin_train is not None:
+        origins = sorted(set(ds.origin_train.tolist()) - {B.BG_ORIGIN})
+        print(f"  note: rows carry {len(origins)} origins ({', '.join(origins[:4])}); "
+              "pass --deployment-origin to measure what that costs", file=sys.stderr)
+
     out = B.save_bundle(Path(args.out), clf, chosen, enc.variant, metrics, comp,
                         ds.counts, source=str(source), hazards=hazards)
     card_path = C.write(out)
@@ -236,7 +243,7 @@ def main(argv=None):
         p.add_argument("--manifest", metavar="FILE",
                        help="parquet/csv with columns label, path [, group, cluster]")
         p.add_argument("--embeddings", metavar="FILE",
-                       help="npz with descriptor, label [, group, cluster]")
+                       help="npz with descriptor, label [, group, cluster, origin]")
         p.add_argument("--name", action="append", help="a label; repeatable")
         p.add_argument("--budget", type=float, metavar="MB",
                        help="size budget for the encoder, in MB")
@@ -246,6 +253,10 @@ def main(argv=None):
                        help="assumed share of queries not on your list (default 0.2)")
         if out:
             p.add_argument("--out", required=True, help="bundle directory to write")
+            p.add_argument("--deployment-origin", metavar="NAME",
+                           help="which `origin` you will actually deploy against; "
+                                "measures what it costs the labels that have no "
+                                "training rows from it")
             p.add_argument("--hazard", action="append", metavar="LABEL",
                            help="a label where being mistaken for a harmless one "
                                 "is the costly error; repeatable")

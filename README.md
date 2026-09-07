@@ -40,8 +40,8 @@ is a property of hierarchical label sets, not of plants.
 | flag | shape |
 |---|---|
 | `--images DIR` | `DIR/<label>/*.jpg` |
-| `--manifest FILE` | parquet/csv: `label`, `path` [, `group`, `cluster`] |
-| `--embeddings FILE` | npz: `descriptor`, `label` [, `group`, `cluster`] |
+| `--manifest FILE` | parquet/csv: `label`, `path` [, `group`, `cluster`, `origin`] |
+| `--embeddings FILE` | npz: `descriptor`, `label` [, `group`, `cluster`, `origin`] |
 
 `--background-*` takes the same three forms and supplies negatives. Without it
 there is no reject class: the model is closed-set, cannot decline, and the card
@@ -54,6 +54,36 @@ anticonservative.
 
 **`group`** is the coarse rank the cascade retreats to, defaulting to the label's
 first whitespace token. Right for Linnaean binomials, overridable everywhere else.
+
+**`origin`** is which acquisition source or population a row came from — a
+corpus, a device, a skin-type band, a speaker group. Optional, and it changes
+nothing unless you supply it. Supply it when your rows come from more than one,
+because the labels that have training rows from the origin you will actually
+deploy against and the labels that do not **are not comparable**, and the ones
+that do not are measurably worse off than if none had them. Pass
+`--deployment-origin NAME` to `build` and the card measures it:
+
+```
+## Origin composition — deployment origin `clinic_dark`
+
+**3 of 28 labels have no training data from `clinic_dark`**, the origin this
+model will be used against.
+
+| labels | with the data | without it | measured effect |
+|---|---|---|---|
+| have it (25) | 0.679 | 0.529 | +0.149 |
+| lack it (3)  | 0.647 | 0.683 | -0.036 |
+```
+
+Two heads on the same label set — one fitted on everything, one with every
+deployment-origin training row removed — scored on the same held-out rows. It is
+**measured rather than warned about** because its size is domain-dependent: ~0 on
+plants once the label set is narrow, 10–20 points on dermatology and keyword
+spotting at every label count tried. **It tracks the accuracy of the build, not
+the number of labels, so it cannot be inferred from a small `K`.** Labels with no
+deployment-origin rows *at all* cannot be scored; they are counted and named
+rather than averaged away, because they are the most exposed and the least
+measurable.
 
 Where the data came from — which corpus, under what licence, reconciled against
 whose taxonomy — is a domain decision, so it lives in your project, not here.

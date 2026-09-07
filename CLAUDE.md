@@ -32,7 +32,7 @@ So no report ever prints coverage without the label-level share beside it.
 | `encode.py` | frozen encoder loading, batched embedding. Torch is an optional extra. |
 | `cascade.py` | label/group/decline, declared `UTILITY`, threshold fitting, clustered splits, cluster bootstrap |
 | `build.py` | head, per-row scores, measurement, hazard union, bundle |
-| `card.py` | the report, and the consequential-label gate |
+| `card.py` | the report, the consequential-label gate, and the origin-composition section |
 | `sweep.py` | run N candidates, return a frontier, decide or refuse |
 | `config.py` | parse/validate a task config |
 | `hub.py` | find candidate encoders on HF, **size-verified locally**. Maintenance only — no build path calls it |
