@@ -277,10 +277,16 @@ def render(manifest: dict) -> str:
         f"| Closed-set top-1 — accuracy when the plant is on your list | "
         f"{_pct(m['closed_set_top1'])} | {_ci(m, 'closed_set_top1')} |",
         "",
-        f"Intervals are bootstrapped over **labels**, not rows, because "
-        f"observations of one label are not independent. This model rests on "
-        f"{m.get('n_label_clusters', '?')} labels in the test half, so they are "
-        f"wide — that width is a fact about your list, not a formatting choice.",
+        # "clusters", not "labels". The bootstrap resamples the cluster column,
+        # which is the label only when no finer grouping was supplied. Calling
+        # them labels overstated the protection on any dataset that supplies a
+        # `cluster` -- and badly so when those clusters are singletons, where
+        # resampling them *is* resampling rows. `sources` notes that case and the
+        # note is printed below.
+        f"Intervals are bootstrapped over **clusters**, not rows, because rows "
+        f"sharing a subject are not independent. This model rests on "
+        f"{m.get('n_label_clusters', '?')} clusters in the test half, so they are "
+        f"wide — that width is a fact about your data, not a formatting choice.",
         "",
     ]
 

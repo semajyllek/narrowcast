@@ -206,7 +206,11 @@ def test_card_shows_cluster_bootstrapped_intervals():
     m["metrics"]["n_label_clusters"] = 7
     out = card.render(m)
     assert "61.0–96.0%" in out
-    assert "over **labels**, not rows" in out
+    # "clusters", not "labels". `_ci` resamples the cluster column, which equals
+    # the label only when the caller supplied no finer grouping. Saying "labels"
+    # overstated the protection for any dataset that does supply `cluster`, and
+    # was actively wrong where those clusters are singletons.
+    assert "over **clusters**, not rows" in out
 
 
 def test_card_dashes_a_missing_interval_rather_than_inventing_one():
@@ -552,6 +556,30 @@ def test_group_matrix_honours_a_supplied_mapping():
     assert sorted(ug2) == ["comp", "rec"]
 
 
+def test_cascade_scores_are_nested_whatever_the_posterior():
+    """`max_c P(c) <= max_g sum_{c in g} P(c) <= sum_{c != OTHER} P(c)`.
+
+    `cascade.py` calls this structural and reasons from it -- it is what makes
+    "confident at label, unsure at group" unreachable and the three-way decision
+    well-ordered. Nothing pinned it. It matters beyond tidiness because the
+    property has to survive score distributions the tool did not produce: a
+    distilled or otherwise miscalibrated model can be arbitrarily
+    temperature-shifted and still must not break the ordering the thresholds are
+    fitted against. Dirichlet draws stand in for "any posterior at all".
+    """
+    classes = np.array(["Sedum acre", "Sedum album", "Sedum dasyphyllum",
+                        "Trifolium repens", "Trifolium pratense", build.OTHER])
+    mask = classes != build.OTHER
+    gmat, _ = cascade.group_matrix(classes, mask)
+    rng = np.random.default_rng(0)
+    for alpha in (0.05, 1.0, 20.0):          # spiky, uniform, and flat posteriors
+        cata = rng.dirichlet(np.full(len(classes), alpha), size=2000)[:, mask]
+        label_conf = cata.max(1)
+        group_conf = (cata @ gmat.T).max(1)
+        assert (label_conf <= group_conf + 1e-12).all()
+        assert (group_conf <= cata.sum(1) + 1e-12).all()
+
+
 def test_binomial_labels_are_unaffected_by_the_fix():
     """Every previously committed result used whitespace-separated binomials, where
     the default rule was already correct."""
@@ -823,3 +851,23 @@ def test_origin_cost_counts_labels_it_cannot_score_instead_of_averaging_them_awa
     assert out["n_unmeasured"] == 1 and out["labels_unmeasured"] == ["c z"]
     text = "\n".join(card._origin_section(out))
     assert "c z" in text and "no `B` rows at" in text
+
+
+def test_singleton_clusters_are_flagged_as_no_clustering():
+    """A unique id per row is arithmetically the same as supplying no cluster
+    column, but it suppresses the "no cluster column" warning — so the card
+    reported clustered intervals for what was a row-level bootstrap.
+
+    Found by running `fit` over a mixed Pl@ntNet/iNaturalist corpus: Pl@ntNet has
+    no observation grouping, its rows were keyed by image id, and 93% of the
+    resulting clusters held exactly one row.
+    """
+    labels = ["Sedum acre", "Sedum album"] * 10
+    rows = sources._finish(labels, descriptor=np.zeros((20, 4)),
+                       cluster=[str(i) for i in range(20)])
+    assert rows.has_clusters
+    assert any("single row" in n for n in rows.notes), rows.notes
+
+    grouped = sources._finish(labels, descriptor=np.zeros((20, 4)),
+                          cluster=[str(i // 5) for i in range(20)])
+    assert not any("single row" in n for n in grouped.notes), grouped.notes

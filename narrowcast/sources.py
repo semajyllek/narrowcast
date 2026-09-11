@@ -76,6 +76,25 @@ def _finish(label, path=None, descriptor=None, group=None, cluster=None, notes=N
         cluster = np.arange(len(label)).astype(str)
         notes.append("no cluster column supplied: every row treated as independent, "
                      "so intervals are anticonservative if several rows share a subject")
+    else:
+        # A cluster column of unique ids is arithmetically identical to no cluster
+        # column at all -- every cluster has one row, so resampling clusters is
+        # resampling rows. It is worse than supplying nothing, because it looks
+        # like the protection is on and suppresses the warning above.
+        #
+        # Found by running `fit` over a real mixed corpus: Pl@ntNet has no
+        # observation grouping, so its rows were keyed by image id and 93% of
+        # clusters came out singleton, while the card reported honest-looking
+        # clustered intervals.
+        c = np.asarray(cluster, dtype=str)
+        _, counts = np.unique(c, return_counts=True)
+        singleton = float((counts == 1).sum()) / max(len(counts), 1)
+        if singleton > 0.5:
+            notes.append(
+                f"{100 * singleton:.0f}% of clusters contain a single row, so for "
+                f"those rows the bootstrap is row-level and the intervals are "
+                f"anticonservative — a unique id per row is the same as supplying "
+                f"no cluster column")
     if origin is not None:
         origin = np.asarray(origin, dtype=str)
         notes.append(f"origin supplied: {len(set(origin.tolist()))} distinct "
