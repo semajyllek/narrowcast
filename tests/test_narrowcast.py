@@ -871,3 +871,55 @@ def test_singleton_clusters_are_flagged_as_no_clustering():
     grouped = sources._finish(labels, descriptor=np.zeros((20, 4)),
                           cluster=[str(i // 5) for i in range(20)])
     assert not any("single row" in n for n in grouped.notes), grouped.notes
+
+
+def _counts(median, minimum=None, n_labels=20, n_below=0):
+    return {"rows_per_label": {"median": median, "min": minimum or median,
+                               "n_labels": n_labels, "n_below_32": n_below}}
+
+
+def test_thin_data_advice_inverts_on_whether_the_model_is_retreating():
+    """Eight rows per label is fine on a separated list and badly short on a
+    crowded one, and the two call for opposite responses — take more photographs,
+    or change the list. The card gave the same advice for both because it never
+    reported how much data the head was fitted on.
+
+    Thresholds and wording come from TINY_FINDINGS.md §2: on a separated list the
+    label-level share is saturated by ~32 rows per label, and on a crowded one 64
+    rows still buys under half of what unlimited data buys.
+    """
+    thin_crowded = card._data_limited_section(
+        {"label_share": 0.02, "group_share": 0.31}, _counts(8))
+    thin_separated = card._data_limited_section(
+        {"label_share": 0.45, "group_share": 0.03}, _counts(8))
+
+    assert "8 training rows per label" in "".join(thin_crowded)
+    assert "helps *least*" in "".join(thin_crowded)
+    assert "helps *most*" in "".join(thin_separated)
+    assert "helps *least*" not in "".join(thin_separated)
+
+
+def test_a_healthy_model_on_thin_data_is_told_so_without_alarm():
+    out = "".join(card._data_limited_section(
+        {"label_share": 0.88, "group_share": 0.01}, _counts(12)))
+    assert "not a problem" in out and "rebuild" in out
+
+
+def test_plentiful_data_says_nothing_and_names_only_the_thin_labels():
+    assert card._data_limited_section(
+        {"label_share": 0.88, "group_share": 0.01}, _counts(400)) == []
+    out = "".join(card._data_limited_section(
+        {"label_share": 0.88, "group_share": 0.01},
+        _counts(400, minimum=9, n_below=3)))
+    assert "3 of 20 labels" in out and "fewest: 9" in out
+
+
+def test_rows_per_label_excludes_the_background_negatives():
+    """`ytr` carries an appended block of __OTHER__ once negatives are supplied.
+    Counting it would put OTHER in the per-label table and drag the median."""
+    rows = _rows(["Sedum acre", "Sedum album"] * 20, ["Sedum"] * 40)
+    bg = _rows(["Bellis perennis"] * 40, ["Bellis"] * 40)
+    ds = build.load_rows(rows, "unused", background=bg)
+    rpl = ds.counts["rows_per_label"]
+    assert rpl["n_labels"] == 2, rpl
+    assert rpl["median"] > 0

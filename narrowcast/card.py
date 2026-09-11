@@ -158,6 +158,74 @@ def _retreat_section(m: dict, comp: dict) -> list:
     return out
 
 
+# Below this many training rows per label, the label-level share was still
+# climbing in every arm measured (narrowcast-plantid TINY_FINDINGS.md §2). Above
+# it the picture splits: on a separated list with a strong encoder 8 rows already
+# buys 100% of what unlimited data buys, while on a group-crowded list 64 rows
+# buys 18-82% and the curve has not flattened. So the floor is where the warning
+# starts, and whether the model is *retreating* decides how hard it lands.
+THIN_ROWS_PER_LABEL = 32
+
+
+def _data_limited_section(m: dict, counts: dict) -> list:
+    """Whether a low label-level share is a data problem or a label-set problem.
+
+    A user with eight photographs per label and one with eight hundred otherwise
+    receive identical cards, and the advice they need is opposite: the first
+    should take more pictures, the second should change the list. Nothing in the
+    card said which, and the numbers to tell them apart were already in the
+    bundle.
+    """
+    rpl = counts.get("rows_per_label") or {}
+    med = rpl.get("median")
+    if not med:
+        return []
+
+    share, group = m.get("label_share"), m.get("group_share")
+    thin = med < THIN_ROWS_PER_LABEL
+    retreating = (group or 0) >= GROUP_RETREAT_BAR
+    out = []
+
+    if thin and share is not None and share < 0.6:
+        # Both explanations are live and the card must not pick one silently.
+        which = (
+            "Your list is also group-crowded and this model is retreating to the "
+            "group rank, which is the case where more data helps *least* — on a "
+            "crowded list 64 rows per label still bought under half of what "
+            "unlimited data bought. Expect more photographs to help, and not to "
+            "be sufficient on their own."
+            if retreating else
+            "Your list is not retreating to the group rank, which is the case "
+            "where more data helps *most* — on a separated list the label-level "
+            "share is typically saturated by around 32 rows per label."
+        )
+        out += [
+            f"> **This head was fitted on {med} training rows per label (median), "
+            f"and that is thin.** A low label-level share here has two possible "
+            f"causes — too little data, or a label set that cannot be told apart "
+            f"— and they call for opposite responses. {which}",
+            "",
+        ]
+    elif thin:
+        out += [
+            f"> **Fitted on {med} training rows per label (median).** The numbers "
+            f"above are healthy, so this is not a problem — but they rest on thin "
+            f"data, and a rebuild with more photographs is the cheapest way to "
+            f"confirm they hold.",
+            "",
+        ]
+    n_thin = rpl.get("n_below_32", 0)
+    if n_thin and n_thin < rpl.get("n_labels", 0):
+        out += [
+            f"{n_thin} of {rpl['n_labels']} labels have fewer than "
+            f"{THIN_ROWS_PER_LABEL} training rows (fewest: {rpl['min']}). Those "
+            f"labels are the least well fitted and are not broken out separately "
+            f"above.",
+            "",
+        ]
+    return out
+
+
 def _unmeasured_lines(oc: dict) -> list:
     """Labels with no deployment-origin rows *at all* cannot be scored.
 
@@ -291,6 +359,7 @@ def render(manifest: dict) -> str:
     ]
 
     L += _retreat_section(m, comp)
+    L += _data_limited_section(m, manifest.get("counts", {}))
     L += _origin_section(m.get("origin_cost"))
 
     L += _hazard_section(m.get("hazard") or {})
@@ -353,7 +422,10 @@ def render(manifest: dict) -> str:
         L.append(f"- No embeddings were available for: "
                  f"{', '.join(counts['missing_organs'])}. Built from the rest.")
     L += ["", "---", "",
-          f"Training rows {counts.get('train', '?')} · evaluation rows "
+          f"Training rows {counts.get('train', '?')}"
+          + (f" ({counts['rows_per_label']['median']}/label median)"
+             if counts.get("rows_per_label", {}).get("median") else "")
+          + f" · evaluation rows "
           f"{sum(v['n'] for v in m.get('per_bucket', {}).values())} · "
           f"bundle format v{manifest['bundle_version']}"]
     return "\n".join(L)

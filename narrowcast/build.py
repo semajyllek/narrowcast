@@ -125,6 +125,22 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
     else:
         notes.append("no background supplied: closed-set only, the model cannot decline")
 
+    # How many training rows each label actually got. The card cannot otherwise
+    # tell a head fitted on eight photographs per label from one fitted on eight
+    # hundred, and they are very different products: on a group-crowded list the
+    # label-level share is still climbing steeply at 64 rows per label, while on a
+    # separated list with a strong encoder it is saturated by 8. Reported so a low
+    # share can be read as "needs more data" rather than "needs a different list".
+    # `rows.label[tr]`, not anything derived from `ytr`: by this point `ytr` may
+    # carry an appended block of OTHER for the background negatives, which are not
+    # a label the user chose and would distort both the median and the minimum.
+    per_label = pd.Series(rows.label[tr]).value_counts()
+    counts["rows_per_label"] = {
+        "median": int(per_label.median()) if len(per_label) else 0,
+        "min": int(per_label.min()) if len(per_label) else 0,
+        "n_labels": int(len(per_label)),
+        "n_below_32": int((per_label < 32).sum()),
+    }
     counts["notes"] = notes
     counts["has_clusters"] = bool(rows.has_clusters)
     return Dataset(np.vstack(Xtr), np.concatenate(ytr), pd.DataFrame(),
