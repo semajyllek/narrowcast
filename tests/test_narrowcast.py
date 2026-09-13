@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -1017,3 +1018,29 @@ def test_render_reports_the_declines_not_just_the_answers(tmp_path):
     rows = _rows(["Sedum acre"] * len(ds.X_eval), ["Sedum"] * len(ds.X_eval))
     text = P.render(P.Bundle(out).predict(ds.X_eval), rows, limit=3)
     assert "named to a label" in text and "declined" in text
+
+
+def test_unlabelled_loader_takes_a_flat_folder(tmp_path):
+    """At predict time the labels are the question, so requiring `DIR/<label>/`
+    would make a user invent a subdirectory per photograph to classify a folder.
+    `from_images` is the training contract; this is the inference one."""
+    for n in ("b.jpg", "a.png", "notes.txt"):
+        (tmp_path / n).write_bytes(b"x")
+    rows = sources.from_unlabelled(tmp_path)
+    assert len(rows) == 2                          # the .txt is not an image
+    assert [Path(p).name for p in rows.path] == ["a.png", "b.jpg"]   # sorted
+    assert set(rows.label) == {sources.UNKNOWN}
+
+
+def test_unlabelled_loader_walks_subdirectories_without_reading_them_as_labels(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "top.jpg").write_bytes(b"x")
+    (tmp_path / "sub" / "deep.jpg").write_bytes(b"x")
+    rows = sources.from_unlabelled(tmp_path)
+    assert len(rows) == 2
+    assert set(rows.label) == {sources.UNKNOWN}    # "sub" is not a label
+
+
+def test_unlabelled_loader_names_what_it_looked_for_when_empty(tmp_path):
+    with pytest.raises(ValueError, match="no images under"):
+        sources.from_unlabelled(tmp_path)

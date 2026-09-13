@@ -116,7 +116,17 @@ def embed(bundle: Bundle, images=None, manifest=None, embeddings=None):
     """Vectors for the rows to classify, and the paths they came from."""
     from narrowcast import sources
 
-    rows = sources.load(images=images, manifest=manifest, embeddings=embeddings)
+    given = [k for k, v in (("--images", images), ("--manifest", manifest),
+                            ("--embeddings", embeddings)) if v]
+    if len(given) != 1:
+        raise ValueError("give exactly one of --images DIR, --manifest FILE or "
+                         "--embeddings FILE" +
+                         (f"; got {', '.join(given)}" if given else ""))
+    # Unlabelled, because the labels are the question. `sources.load` routes
+    # --images at the DIR/<label>/*.jpg training layout, which would require a
+    # subdirectory per photograph here.
+    rows = (sources.from_unlabelled(images) if images
+            else sources.load(manifest=manifest, embeddings=embeddings))
     if rows.descriptor is not None:
         return np.asarray(rows.descriptor, dtype="float32"), rows
     from narrowcast.encode import embed_images, load_encoder

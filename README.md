@@ -213,7 +213,9 @@ evaluates against held-out data, and writes a bundle plus a card.
 behaviour, cluster-bootstrapped intervals, and a **gate** on labels you declared
 consequential.
 
-**`predict`** — run the model, answering the way the card says it answers.
+**`predict`** — run the model, answering the way the card says it answers. Takes a
+plain folder of images: `build` wants `DIR/<label>/`, but at predict time the
+labels are what you are asking for.
 
 ```bash
 narrowcast predict models/mine --images ./new-photos

@@ -8,7 +8,8 @@ making them.
 
 Three ways in, in increasing order of "I have already done the work":
 
-    --images DIR          DIR/<label>/*.jpg
+    --images DIR          DIR/<label>/*.jpg   (training; `predict` takes a flat
+                          folder instead, since there the labels are the question)
     --manifest FILE       parquet/csv with columns: label, path [, group, cluster, origin]
     --embeddings FILE     .npz with arrays: descriptor, label [, group, cluster, origin]
 
@@ -119,6 +120,33 @@ def from_images(root) -> Rows:
         raise ValueError(f"no images under {root} — expected {root}/<label>/*.jpg")
     return _finish(labels, path=paths,
                    notes=[f"{len(set(labels))} labels from subdirectory names under {root}"])
+
+
+UNKNOWN = "__UNKNOWN__"
+
+
+def from_unlabelled(root) -> Rows:
+    """Every image under DIR, at any depth, with no labels required.
+
+    `from_images` expects `DIR/<label>/*.jpg`, which is the right contract for
+    *training* data and the wrong one for inference: at predict time the labels
+    are what you are asking for, so demanding them in the directory layout would
+    make a user invent a subdirectory per photograph to classify a folder.
+
+    Files are sorted so a run is reproducible, and subdirectories are walked
+    rather than required -- a flat folder and an already-sorted one both work, and
+    neither is read as a label.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        raise FileNotFoundError(f"{root} is not a directory")
+    paths = sorted(str(f) for f in root.rglob("*")
+                   if f.is_file() and f.suffix.lower() in IMAGE_SUFFIXES)
+    if not paths:
+        raise ValueError(f"no images under {root} (looked for "
+                         f"{', '.join(sorted(IMAGE_SUFFIXES))} at any depth)")
+    return _finish([UNKNOWN] * len(paths), path=paths,
+                   notes=[f"{len(paths)} unlabelled images from {root}"])
 
 
 def from_manifest(path) -> Rows:
