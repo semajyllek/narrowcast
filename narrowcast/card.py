@@ -167,6 +167,40 @@ def _retreat_section(m: dict, comp: dict) -> list:
 THIN_ROWS_PER_LABEL = 32
 
 
+def _inert_group_section(manifest: dict, m: dict) -> list:
+    """Say so when every label is its own group, because the cascade is then two-way.
+
+    The three-way decision needs a coarse rank to retreat to. If the group map is
+    the identity -- which is what the default first-whitespace-token rule produces
+    for single-word labels like keywords, and for dotted ones like
+    `comp.sys.mac.hardware` -- then a group answer *is* a label answer, group mass
+    never sums across labels, and the cascade can only name or decline.
+
+    That is not a defect and the fitted thresholds handle it correctly. But it
+    halves what the model can do, it is invisible in every number on this card,
+    and it is usually an accident: the caller had a coarse rank available and did
+    not supply it. Found by building a keyword model where `yes`, `no` and `up`
+    each became their own group.
+    """
+    groups = manifest.get("groups") or {}
+    labels = manifest.get("labels") or []
+    if len(labels) < 2 or not groups:
+        return []
+    distinct = len({groups.get(l, l) for l in labels})
+    if distinct < len(labels):
+        return []
+    return [
+        f"> **The group rank is inert — all {len(labels)} labels are their own "
+        f"group.** This model can only name a label or decline; there is no coarser "
+        f"answer to retreat to, so the group share above is 0% by construction "
+        f"rather than by measurement. If your labels do have a coarser rank — a "
+        f"genus, a product family, a phoneme class — supply it as a `group` column "
+        f"and rebuild, and the model gains a third answer. If they genuinely do "
+        f"not, this is correct and nothing is wrong.",
+        "",
+    ]
+
+
 def _data_limited_section(m: dict, counts: dict) -> list:
     """Whether a low label-level share is a data problem or a label-set problem.
 
@@ -317,7 +351,11 @@ def render(manifest: dict) -> str:
     m = manifest["metrics"]
     comp = manifest["composition"]
     enc = BY_VARIANT.get(manifest["encoder"])
-    sizing = f"{enc.size_mb():.1f} MB int4" if enc else "size unknown"
+    # An encoder this tool never ran has no size it can state. Quoting the
+    # registry's bytes for a precomputed vector file would attach a fabricated
+    # number to the artifact whose whole job is being checkable.
+    sizing = (f"{enc.size_mb():.1f} MB int4" if enc else
+              "size not stated — vectors were precomputed elsewhere")
 
     L = [
         f"# Model card — {comp['n_labels']} labels",
@@ -359,6 +397,7 @@ def render(manifest: dict) -> str:
     ]
 
     L += _retreat_section(m, comp)
+    L += _inert_group_section(manifest, m)
     L += _data_limited_section(m, manifest.get("counts", {}))
     L += _origin_section(m.get("origin_cost"))
 

@@ -66,9 +66,25 @@ def _hazard_arg(args, chosen) -> list[str]:
 
 
 def cmd_build(args):
-    enc = (encoders.BY_VARIANT[args.encoder] if args.encoder
-           else encoders.choose(args.budget))
     external = args.images or args.manifest or args.embeddings
+    # Precomputed vectors mean the encoder ran somewhere else and this tool never
+    # saw it. Naming one from the registry would put a fabricated provenance --
+    # and a meaningless byte size -- on the card, which is the one artifact that
+    # has to be trustworthy. Found by building an audio model from wav2vec2
+    # vectors: the card claimed `mobileclip2_s0` at 5.7 MB int4, an image encoder
+    # that had nothing to do with it.
+    precomputed = bool(args.embeddings)
+    if precomputed:
+        enc = None
+        encoder_name = args.encoder_name or "precomputed"
+        if args.encoder:
+            print("  note: --encoder is ignored with --embeddings; the vectors "
+                  "already fix the encoder. Use --encoder-name to record which.",
+                  file=sys.stderr)
+    else:
+        enc = (encoders.BY_VARIANT[args.encoder] if args.encoder
+               else encoders.choose(args.budget))
+        encoder_name = enc.variant
 
     if external:
         rows = SRC.load(args.images, args.manifest, args.embeddings)
@@ -78,18 +94,18 @@ def cmd_build(args):
                   or args.background_embeddings) else None)
         chosen = rows.labels
         comp = S.analyse(chosen, pool=chosen)
-        print(f"encoder {enc.label}, {len(chosen)} labels, {len(rows)} rows",
-              file=sys.stderr)
+        print(f"encoder {enc.label if enc else encoder_name}, {len(chosen)} "
+              f"labels, {len(rows)} rows", file=sys.stderr)
         for n in rows.notes:
             print(f"  note: {n}", file=sys.stderr)
-        ds = B.load_rows(rows, enc.variant, background=bg)
+        ds = B.load_rows(rows, encoder_name, background=bg)
         source = args.images or args.manifest or args.embeddings
     else:
         chosen = _species_arg(args)
         comp = S.analyse(chosen)
         print(f"encoder {enc.label} ({enc.size_mb():.1f} MB int4), "
               f"{len(chosen)} labels", file=sys.stderr)
-        ds = B.load_local(enc.variant, chosen)
+        ds = B.load_local(encoder_name, chosen)
         missing = set(chosen) - set(ds.y_train)
         if missing:
             print(f"warning: no training rows for {len(missing)} labels: "
@@ -117,7 +133,7 @@ def cmd_build(args):
     # rank the card measured rather than re-deriving it from whitespace.
     gmap = (dict(zip(rows.label.tolist(), rows.group.tolist())) if external
             else {c: S.group_of(c) for c in chosen})
-    out = B.save_bundle(Path(args.out), clf, chosen, enc.variant, metrics, comp,
+    out = B.save_bundle(Path(args.out), clf, chosen, encoder_name, metrics, comp,
                         ds.counts, source=str(source), hazards=hazards, groups=gmap)
     card_path = C.write(out)
     print(f"\nbundle {out}\ncard   {card_path}", file=sys.stderr)
@@ -271,6 +287,9 @@ def main(argv=None):
                        help="size budget for the encoder, in MB")
         p.add_argument("--encoder", choices=sorted(encoders.BY_VARIANT),
                        help="override the budget-based choice")
+        p.add_argument("--encoder-name", metavar="NAME",
+                       help="with --embeddings: record which encoder produced the "
+                            "vectors. Declared, not verified — the tool never ran it")
         p.add_argument("--ood-rate", type=float, default=0.2, metavar="P",
                        help="assumed share of queries not on your list (default 0.2)")
         if out:

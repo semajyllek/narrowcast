@@ -163,6 +163,26 @@ never loads them, so the name is a label and the size is the upstream model's.
 | speech / keywords | `wav2vec2-base` *(precomputed)* | — | general speech model; groups by phonetics, not meaning |
 | text | `all-MiniLM-L6-v2` *(precomputed)* | — | 22.7M sentence encoder |
 
+**Precomputed means the tool never ran it.** With `--embeddings` the vectors fix
+the encoder and narrowcast has no way to verify which one produced them, so
+`--encoder` is ignored and the card states no size. Pass `--encoder-name` to
+record it for provenance — declared, not verified:
+
+```bash
+narrowcast build --embeddings kws.npz --background-embeddings bg.npz \
+    --encoder-name wav2vec2-base --out models/keywords
+```
+
+```
+Built … · encoder `wav2vec2-base` (size not stated — vectors were precomputed elsewhere)
+```
+
+**Supply a `group` column for any non-binomial domain.** The default coarse rank
+is the label's first whitespace token, which for single-word labels like keywords
+makes every label its own group — the cascade loses its third answer and the card
+now says so. On six Speech Commands keywords, adding acoustic groups took coverage
+from **52.0% to 62.0%** at comparable precision.
+
 Byte order is not speed order: `plantclef24` is a third of BioCLIP-2's parameters
 and roughly twice its latency, because it runs at 5.3× the pixels. Storage and
 compute are separate budgets and the registry ranks only one.

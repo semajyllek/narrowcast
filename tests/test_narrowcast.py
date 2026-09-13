@@ -1044,3 +1044,45 @@ def test_unlabelled_loader_walks_subdirectories_without_reading_them_as_labels(t
 def test_unlabelled_loader_names_what_it_looked_for_when_empty(tmp_path):
     with pytest.raises(ValueError, match="no images under"):
         sources.from_unlabelled(tmp_path)
+
+
+# ---- multi-modal honesty ---------------------------------------------------
+
+def _mf(labels_, groups_=None, encoder="mobileclip2_s2"):
+    m = _manifest(0.5)
+    m["labels"] = labels_
+    m["encoder"] = encoder
+    m["groups"] = groups_ or {l: l for l in labels_}
+    m["metrics"]["group_share"] = 0.0
+    m["metrics"]["decline_share"] = 0.5
+    return m
+
+
+def test_card_states_no_size_for_an_encoder_it_never_ran():
+    """`--embeddings` means the encoder ran elsewhere. Quoting the registry's
+    bytes would put a fabricated number on the artifact whose job is being
+    checkable — a wav2vec2 audio model was carded as `mobileclip2_s0`, 5.7 MB."""
+    out = card.render(_mf(["yes", "no"], encoder="wav2vec2-base"))
+    assert "precomputed elsewhere" in out
+    assert "5.7 MB" not in out and "MB int4" not in out
+
+
+def test_card_says_when_the_group_rank_is_inert():
+    """Single-word labels make the default rule the identity map, so the cascade
+    is two-way and the 0% group share is construction rather than measurement."""
+    out = card.render(_mf(["yes", "no", "up", "down"]))
+    assert "group rank is inert" in out
+    assert "all 4 labels are their own group" in out
+
+
+def test_card_is_silent_when_a_real_coarse_rank_was_supplied():
+    out = card.render(_mf(["yes", "no", "up", "down"],
+                          {"yes": "g6", "no": "g5", "up": "g5", "down": "g1"}))
+    assert "group rank is inert" not in out
+
+
+def test_inert_check_needs_the_stored_map_and_stays_quiet_without_it():
+    """A format 1 bundle has no map; absence is not evidence the rank is inert."""
+    m = _mf(["yes", "no"])
+    m["groups"] = {}
+    assert "group rank is inert" not in card.render(m)
