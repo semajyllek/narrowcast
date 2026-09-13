@@ -1049,10 +1049,15 @@ def test_unlabelled_loader_names_what_it_looked_for_when_empty(tmp_path):
 # ---- multi-modal honesty ---------------------------------------------------
 
 def _mf(labels_, groups_=None, encoder="mobileclip2_s2"):
+    """A manifest whose composition is derived from the group map, as `cmd_build`
+    now derives it -- a fixture that hardcodes one and varies the other tests a
+    combination the tool cannot produce."""
     m = _manifest(0.5)
+    gmap = groups_ or {l: l for l in labels_}
     m["labels"] = labels_
     m["encoder"] = encoder
-    m["groups"] = groups_ or {l: l for l in labels_}
+    m["groups"] = gmap
+    m["composition"] = labels.analyse(labels_, pool=labels_, groups=gmap)
     m["metrics"]["group_share"] = 0.0
     m["metrics"]["decline_share"] = 0.5
     return m
@@ -1086,3 +1091,42 @@ def test_inert_check_needs_the_stored_map_and_stays_quiet_without_it():
     m = _mf(["yes", "no"])
     m["groups"] = {}
     assert "group rank is inert" not in card.render(m)
+
+
+def test_analyse_honours_the_supplied_group_map():
+    """Third place the first-whitespace-token default has broken a non-binomial
+    domain, after `score_frame` and `predict`. Without the map, `comp.graphics`
+    and `comp.sys.mac.hardware` are reported as different groups -- so the card
+    asserted "your list is group-crowded" while its own composition block said
+    seven groups for seven labels."""
+    news = ["comp.graphics", "comp.sys.mac.hardware", "rec.autos"]
+    bare = labels.analyse(news, pool=news)
+    assert bare["n_groups"] == 3 and bare["crowded_groups"] == {}
+
+    gmap = {"comp.graphics": "comp", "comp.sys.mac.hardware": "comp",
+            "rec.autos": "rec"}
+    mapped = labels.analyse(news, pool=news, groups=gmap)
+    assert mapped["n_groups"] == 2
+    assert mapped["crowded_groups"] == {"comp": 2}
+    assert mapped["in_set_sibling_frac"] == pytest.approx(2 / 3)
+
+
+def test_card_does_not_speak_about_plants_or_photographs():
+    """The tool is domain-general; a text or audio card that describes
+    "photographs you take" and "when the plant is on your list" is wrong and
+    costs exactly the trust the card exists to build."""
+    out = card.render(_mf(["comp.graphics", "comp.sys.mac.hardware"],
+                          {"comp.graphics": "comp", "comp.sys.mac.hardware": "comp"},
+                          encoder="all-MiniLM-L6-v2"))
+    low = out.lower()
+    assert "photograph" not in low and "plant" not in low
+
+
+def test_crowded_example_names_a_real_group_or_rephrases():
+    """With a crowded group to name the card quotes it; without one it used to
+    emit the sentence "it is a group", which reads as a bug because it is one."""
+    named = card.render(_mf(["comp.graphics", "comp.sys.mac.hardware"],
+                            {"comp.graphics": "comp", "comp.sys.mac.hardware": "comp"}))
+    assert '"it is a comp"' in named
+    bare = card.render(_mf(["alpha", "beta"]))
+    assert "it is a group" not in bare

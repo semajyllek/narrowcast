@@ -88,8 +88,8 @@ def _hazard_section(hz: dict) -> list:
     L.append("")
     if any(not v.get("ci") for v in hz.values()):
         L += ["_No interval where the data offers no grouping inside a single "
-              "label — these images are not grouped by individual plant, and a "
-              "row-level interval would treat several photographs of one plant as "
+              "label — these rows are not grouped by subject, and a "
+              "row-level interval would treat several rows of one subject as "
               "independent. Sources carrying observation ids do get intervals._", ""]
     return L
 
@@ -110,7 +110,10 @@ def _retreat_section(m: dict, comp: dict) -> list:
     share, group, decline = (m.get("label_share"), m.get("group_share"),
                              m.get("decline_share"))
     headroom = m.get("headroom")
-    example = next(iter(comp.get("crowded_groups") or {}), "group")
+    # Falls back to the *phrasing* rather than a placeholder word: with no crowded
+    # group to name, the old default produced the sentence "it is a group", which
+    # reads as a bug because it is one.
+    example = next(iter(comp.get("crowded_groups") or {}), None)
     out = []
 
     if share is not None and share < 0.6:
@@ -131,9 +134,12 @@ def _retreat_section(m: dict, comp: dict) -> list:
         out += [
             f"> **Read the label-level share, not the coverage.** This model names "
             f"a label on only {_pct(share)} of in-list observations; {where}. "
-            f"Because your list is group-crowded, a group answer may narrow "
-            f"nothing — \"it is a {example}\" when most of your list is that "
-            f"group. {cost}".rstrip(),
+            + (f"Because your list is group-crowded, a group answer may narrow "
+               f"nothing — \"it is a {example}\" when most of your list is that "
+               f"group. " if example else
+               f"A group answer narrows the field only as far as the group goes, "
+               f"which on a crowded list may be no distance at all. ")
+            + f"{cost}".rstrip(),
             "",
         ]
     elif group is not None and group >= GROUP_RETREAT_BAR:
@@ -204,7 +210,7 @@ def _inert_group_section(manifest: dict, m: dict) -> list:
 def _data_limited_section(m: dict, counts: dict) -> list:
     """Whether a low label-level share is a data problem or a label-set problem.
 
-    A user with eight photographs per label and one with eight hundred otherwise
+    A user with eight rows per label and one with eight hundred otherwise
     receive identical cards, and the advice they need is opposite: the first
     should take more pictures, the second should change the list. Nothing in the
     card said which, and the numbers to tell them apart were already in the
@@ -226,7 +232,7 @@ def _data_limited_section(m: dict, counts: dict) -> list:
             "Your list is also group-crowded and this model is retreating to the "
             "group rank, which is the case where more data helps *least* — on a "
             "crowded list 64 rows per label still bought under half of what "
-            "unlimited data bought. Expect more photographs to help, and not to "
+            "unlimited data bought. Expect more data to help, and not to "
             "be sufficient on their own."
             if retreating else
             "Your list is not retreating to the group rank, which is the case "
@@ -244,7 +250,7 @@ def _data_limited_section(m: dict, counts: dict) -> list:
         out += [
             f"> **Fitted on {med} training rows per label (median).** The numbers "
             f"above are healthy, so this is not a problem — but they rest on thin "
-            f"data, and a rebuild with more photographs is the cheapest way to "
+            f"data, and a rebuild with more rows is the cheapest way to "
             f"confirm they hold.",
             "",
         ]
@@ -366,7 +372,7 @@ def render(manifest: dict) -> str:
         "## What it answers",
         "",
         f"Measured on held-out data at an assumed **{_pct(m['p_ood'])} out-of-list "
-        f"rate** — the share of photographs you take that are of something not on "
+        f"rate** — the share of inputs you will show it that are of something not on "
         f"your list. That assumption is the single biggest lever on these numbers; "
         f"rebuild with `--ood-rate` if it is wrong for you.",
         "",
@@ -380,7 +386,7 @@ def render(manifest: dict) -> str:
         f"**{_pct(m['label_share'])}** | {_ci(m, 'label_share')} |",
         f"| Group-level share — in-list observations answered at group only | "
         f"{_pct(m.get('group_share'))} | {_ci(m, 'group_share')} |",
-        f"| Closed-set top-1 — accuracy when the plant is on your list | "
+        f"| Closed-set top-1 — accuracy when the answer is on your list | "
         f"{_pct(m['closed_set_top1'])} | {_ci(m, 'closed_set_top1')} |",
         "",
         # "clusters", not "labels". The bootstrap resamples the cluster column,
@@ -406,7 +412,7 @@ def render(manifest: dict) -> str:
     L += ["## Where it declines and where it errs", "", "| bucket | n | answered | correct when answered |",
           "|---|---|---|---|"]
     labels = {"in_catalog": "on your list", "near_ood": "relatives you did not choose",
-              "distant_ood": "unrelated plants"}
+              "distant_ood": "unrelated inputs"}
     for b, v in m.get("per_bucket", {}).items():
         L.append(f"| {labels.get(b, b)} | {v['n']} | {_pct(v['answered'])} | "
                  f"{_pct(v['correct_when_answered'])} |")
@@ -452,9 +458,12 @@ def render(manifest: dict) -> str:
         "- **A correct-looking answer is not verification.** Where being wrong is "
         "expensive, treat an answer as a candidate to check, never as a result. "
         "The within-group case is the measured weak point.",
-        "- Numbers above are held-out but come from the same image source as training. "
-        "Photographs taken differently — your phone, your light, your angles — will "
-        "score lower.",
+        "- Numbers above are held-out but come from the **same source** as training. "
+        "Inputs acquired differently — another camera, another microphone, another "
+        "corpus — score lower, and how much lower depends on the encoder: measured "
+        "across one such change it cost a 152 MB encoder 0.1pp and a 17.9 MB one "
+        "17.9pp. A small encoder is the case to re-check before trusting these "
+        "numbers on your own acquisition.",
     ]
     counts = manifest.get("counts", {})
     if counts.get("missing_organs"):

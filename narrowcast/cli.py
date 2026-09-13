@@ -93,7 +93,8 @@ def cmd_build(args):
               if (args.background_images or args.background_manifest
                   or args.background_embeddings) else None)
         chosen = rows.labels
-        comp = S.analyse(chosen, pool=chosen)
+        gmap = dict(zip(rows.label.tolist(), rows.group.tolist()))
+        comp = S.analyse(chosen, pool=chosen, groups=gmap)
         print(f"encoder {enc.label if enc else encoder_name}, {len(chosen)} "
               f"labels, {len(rows)} rows", file=sys.stderr)
         for n in rows.notes:
@@ -131,8 +132,8 @@ def cmd_build(args):
 
     # The caller's group column, persisted so `predict` answers at the same coarse
     # rank the card measured rather than re-deriving it from whitespace.
-    gmap = (dict(zip(rows.label.tolist(), rows.group.tolist())) if external
-            else {c: S.group_of(c) for c in chosen})
+    if not external:
+        gmap = {c: S.group_of(c) for c in chosen}
     out = B.save_bundle(Path(args.out), clf, chosen, encoder_name, metrics, comp,
                         ds.counts, source=str(source), hazards=hazards, groups=gmap)
     card_path = C.write(out)
@@ -222,7 +223,8 @@ def cmd_fit(args):
     print(f"\n  selected {pick.encoder} — smallest that clears the floor\n")
     ds = B.load_rows(rows, pick.encoder, background=background)
     clf = B.fit_head(ds)
-    comp = S.analyse(rows.labels, pool=rows.labels)
+    comp = S.analyse(rows.labels, pool=rows.labels,
+                     groups=dict(zip(rows.label.tolist(), rows.group.tolist())))
     out = B.save_bundle(Path(args.out), clf, rows.labels, pick.encoder, pick.metrics,
                         comp, ds.counts, source=str(cfg.data), hazards=list(cfg.hazards),
                         groups=dict(zip(rows.label.tolist(), rows.group.tolist())))

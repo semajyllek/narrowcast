@@ -117,7 +117,8 @@ def group_of(label: str) -> str:
     return str(label).split()[0] if str(label).split() else str(label)
 
 
-def analyse(chosen: list[str], pool: list[str] | None = None) -> dict:
+def analyse(chosen: list[str], pool: list[str] | None = None,
+            groups: dict | None = None) -> dict:
     """Composition of a species list, plus the relatives it leaves outside.
 
     `in_set_congener_frac` is the share of chosen species sharing a genus with
@@ -125,13 +126,22 @@ def analyse(chosen: list[str], pool: list[str] | None = None) -> dict:
     the measured arms sit at roughly 0.10-0.44 (unrelated draws) and 1.00
     (genus-dense draws).
     """
+    # `groups` is the caller's map and wins wherever it is supplied. Without it
+    # this fell back to the first-whitespace-token rule -- a Latin-binomial
+    # convention -- and reported `comp.graphics` and `comp.sys.mac.hardware` as
+    # belonging to different groups. The cascade knew better because `score_frame`
+    # was fixed to read the supplied column, so the card ended up asserting "your
+    # list is group-crowded" while its own composition block said there were seven
+    # groups for seven labels. Third place the same default has broken a
+    # non-binomial domain, after `score_frame` and `predict`.
+    gof = (lambda x: groups.get(x, group_of(x))) if groups else group_of
     pool = list(chosen) if pool is None else pool
     chosen = list(dict.fromkeys(chosen))
-    gcount = Counter(group_of(s) for s in chosen)
+    gcount = Counter(gof(s) for s in chosen)
 
     by_genus = defaultdict(list)
     for s in pool:
-        by_genus[group_of(s)].append(s)
+        by_genus[gof(s)].append(s)
 
     inside = {g: n for g, n in gcount.items() if n >= 2}
 
@@ -150,7 +160,7 @@ def analyse(chosen: list[str], pool: list[str] | None = None) -> dict:
         "labels": chosen,
         "n_labels": len(chosen),
         "n_groups": len(gcount),
-        "in_set_sibling_frac": sum(gcount[group_of(s)] >= 2 for s in chosen) / n,
+        "in_set_sibling_frac": sum(gcount[gof(s)] >= 2 for s in chosen) / n,
         "crowded_groups": dict(sorted(inside.items(), key=lambda kv: -kv[1])),
         "outside_siblings": dict(sorted(outside.items(), key=lambda kv: -len(kv[1]))),
         "n_groups_with_outside": len(outside),
