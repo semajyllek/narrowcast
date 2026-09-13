@@ -13,6 +13,7 @@ for a human refreshing that registry, and nothing it prints is directly usable.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from narrowcast import card as C
 from narrowcast import build as B  # noqa: F811
 from narrowcast import config as CFG
 from narrowcast import encoders, hub as HUB, labels as S, plan as P
-from narrowcast import sources as SRC, sweep as SW
+from narrowcast import predict as PRED, sources as SRC, sweep as SW
 
 
 def _species_arg(args) -> list[str]:
@@ -112,8 +113,12 @@ def cmd_build(args):
         print(f"  note: rows carry {len(origins)} origins ({', '.join(origins[:4])}); "
               "pass --deployment-origin to measure what that costs", file=sys.stderr)
 
+    # The caller's group column, persisted so `predict` answers at the same coarse
+    # rank the card measured rather than re-deriving it from whitespace.
+    gmap = (dict(zip(rows.label.tolist(), rows.group.tolist())) if external
+            else {c: S.group_of(c) for c in chosen})
     out = B.save_bundle(Path(args.out), clf, chosen, enc.variant, metrics, comp,
-                        ds.counts, source=str(source), hazards=hazards)
+                        ds.counts, source=str(source), hazards=hazards, groups=gmap)
     card_path = C.write(out)
     print(f"\nbundle {out}\ncard   {card_path}", file=sys.stderr)
     print(f"\n  coverage {100*metrics['coverage']:.1f}%  "
@@ -203,7 +208,8 @@ def cmd_fit(args):
     clf = B.fit_head(ds)
     comp = S.analyse(rows.labels, pool=rows.labels)
     out = B.save_bundle(Path(args.out), clf, rows.labels, pick.encoder, pick.metrics,
-                        comp, ds.counts, source=str(cfg.data), hazards=list(cfg.hazards))
+                        comp, ds.counts, source=str(cfg.data), hazards=list(cfg.hazards),
+                        groups=dict(zip(rows.label.tolist(), rows.group.tolist())))
     print(f"  bundle {out}\n  card   {C.write(out)}\n")
     return 0
 
@@ -224,6 +230,22 @@ def cmd_encoders(args):
           f"and\n  `encoders.ENCODERS` (its measured size), then name it in "
           f"`constraints.encoders`.")
     print()
+    return 0
+
+
+def cmd_predict(args):
+    """Classify rows with a built model, through the same cascade the card measured."""
+    b = PRED.Bundle(Path(args.bundle))
+    for n in b.notes:
+        print(f"  note: {n}", file=sys.stderr)
+    X, rows = PRED.embed(b, args.images, args.manifest, args.embeddings)
+    results = b.predict(X)
+    if args.json:
+        out = [{**r, "path": (str(rows.path[i]) if rows.path is not None else None)}
+               for i, r in enumerate(results)]
+        Path(args.json).write_text(json.dumps(out, indent=2))
+        print(f"wrote {args.json}", file=sys.stderr)
+    print(PRED.render(results, rows, limit=args.limit))
     return 0
 
 
@@ -290,6 +312,16 @@ def main(argv=None):
     p_fit.add_argument("--config", required=True, help="task config (YAML or JSON)")
     p_fit.add_argument("--out", required=True, help="bundle directory to write")
     p_fit.set_defaults(fn=cmd_fit)
+
+    p_pred = sub.add_parser("predict", help="classify rows with a built bundle")
+    p_pred.add_argument("bundle")
+    p_pred.add_argument("--images", metavar="DIR")
+    p_pred.add_argument("--manifest", metavar="FILE")
+    p_pred.add_argument("--embeddings", metavar="FILE")
+    p_pred.add_argument("--json", metavar="FILE", help="write full results as JSON")
+    p_pred.add_argument("--limit", type=int, default=20,
+                        help="rows to print; the summary always covers all of them")
+    p_pred.set_defaults(fn=cmd_predict)
 
     p_card = sub.add_parser("card", help="print the card for a built bundle")
     p_card.add_argument("bundle")

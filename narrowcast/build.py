@@ -48,7 +48,7 @@ OTHER = "__OTHER__"
 BG_TRAIN_FRAC = 0.6
 BG_ORIGIN = "__BACKGROUND__"
 OOD_MIX = {"near_ood": 0.32, "distant_ood": 0.68}
-BUNDLE_VERSION = 1
+BUNDLE_VERSION = 2
 
 
 @dataclass
@@ -469,8 +469,19 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
 
 
 def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
-                source: str, hazards=None) -> Path:
-    """Head weights, thresholds, and everything needed to reproduce the claim."""
+                source: str, hazards=None, groups=None) -> Path:
+    """Head weights, thresholds, and everything needed to reproduce the claim.
+
+    `groups` is the label -> group map, and storing it is what makes `predict`
+    agree with the card. Without it a bundle can only re-derive the coarse rank
+    from the label's first whitespace token, which is a Latin-binomial convention:
+    on a domain like `comp.sys.mac.hardware` it makes every label its own group,
+    so the cascade silently loses the rank it was measured with. The caller's
+    group column wins at build time and has to keep winning at predict time.
+
+    Bundle format 2 adds it. A v1 bundle has no map and `predict` says so rather
+    than guessing.
+    """
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "head.npz", coef=clf.coef_, intercept=clf.intercept_,
@@ -489,6 +500,7 @@ def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
         "metrics": metrics,
         "utility": UTILITY,
         "ood_mix": OOD_MIX,
+        "groups": {str(k): str(v) for k, v in (groups or {}).items()},
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return out

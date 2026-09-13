@@ -329,8 +329,21 @@ def test_bundle_round_trip(tmp_path):
     assert loaded["labels"] == m["labels"]
     assert loaded["encoder"] == "mobileclip2_s2"
     assert loaded["metrics"]["coverage"] == 0.84
-    assert json.loads((out / "manifest.json").read_text())["bundle_version"] == 1
+    assert json.loads((out / "manifest.json").read_text())["bundle_version"] == 2
     assert (out / "head.npz").exists()
+
+
+def test_bundle_stores_the_group_map_for_predict(tmp_path):
+    """Format 2 persists label -> group. Without it `predict` can only re-derive
+    the coarse rank from the first whitespace token, which is a Latin-binomial
+    convention: on `comp.sys.mac.hardware` every label becomes its own group and
+    the cascade silently loses the rank it was measured with."""
+    m = _manifest(0.5)
+    gmap = {"comp.graphics": "comp", "comp.windows.x": "comp", "rec.autos": "rec"}
+    out = build.save_bundle(tmp_path / "b", _Clf(), list(gmap), "mobileclip2_s2",
+                            m["metrics"], labels.analyse(m["labels"], pool=POOL),
+                            {"train": 100}, source="x", groups=gmap)
+    assert build.load_bundle(out)["groups"] == gmap
 
 
 # ---- data sources: the tool takes a dataset, it does not fetch one ---------
@@ -923,3 +936,84 @@ def test_rows_per_label_excludes_the_background_negatives():
     rpl = ds.counts["rows_per_label"]
     assert rpl["n_labels"] == 2, rpl
     assert rpl["median"] > 0
+
+
+# ---- predict ---------------------------------------------------------------
+
+def _built(tmp_path, labels_, groups_, n=12):
+    rows = _rows(labels_ * n, groups_ * n)
+    bg = _rows(["Bellis perennis"] * (4 * n), ["Bellis"] * (4 * n))
+    ds = build.load_rows(rows, "unused", background=bg)
+    clf = build.fit_head(ds)
+    frame = build.score_frame(clf, ds)
+    m = build.fit_and_measure(frame, p_ood=0.2)
+    gmap = dict(zip(labels_, groups_))
+    out = build.save_bundle(tmp_path / "b", clf, labels_, "mobileclip2_s2", m,
+                            labels.analyse(labels_, pool=labels_), ds.counts,
+                            source="test", groups=gmap)
+    return out, ds, frame, m
+
+
+def test_predict_reproduces_the_scores_the_card_was_measured_from(tmp_path):
+    """The contract: a prediction and the card cannot disagree.
+
+    `predict` recomputes the posterior from saved weights rather than calling
+    sklearn, masks `__OTHER__` out of both scores, and sums group mass the same
+    way. If any of that drifts, the card describes a model the user is not
+    running.
+    """
+    from narrowcast import predict as P
+    out, ds, frame, _ = _built(tmp_path, ["Sedum acre", "Sedum album", "Bellis annua"],
+                               ["Sedum", "Sedum", "Bellis"])
+    res = P.Bundle(out).predict(ds.X_eval)
+    assert np.allclose([r["label_conf"] for r in res],
+                       frame["label_conf"].to_numpy(), atol=1e-9)
+    assert np.allclose([r["group_conf"] for r in res],
+                       frame["group_conf"].to_numpy(), atol=1e-9)
+
+
+def test_predict_decisions_match_the_fitted_cascade(tmp_path):
+    from narrowcast import predict as P
+    out, ds, frame, _ = _built(tmp_path, ["Sedum acre", "Sedum album", "Bellis annua"],
+                               ["Sedum", "Sedum", "Bellis"])
+    b = P.Bundle(out)
+    got = np.array([r["rank"] for r in b.predict(ds.X_eval)], dtype=object)
+    want = cascade.decide(frame["label_conf"].to_numpy(),
+                          frame["group_conf"].to_numpy(), b.t_group, b.t_label)
+    assert (got == want).all()
+    assert set(got) <= {cascade.LABEL, cascade.GROUP, cascade.DECLINE}
+
+
+def test_predict_answers_at_the_group_the_caller_declared(tmp_path):
+    """Non-binomial labels: the coarse rank must come from the stored map, not
+    from the first whitespace token, which would make every label its own group."""
+    from narrowcast import predict as P
+    out, ds, _, _ = _built(tmp_path, ["comp.graphics", "comp.windows.x", "rec.autos"],
+                           ["comp", "comp", "rec"])
+    b = P.Bundle(out)
+    assert set(b.ugroups) == {"comp", "rec"}
+    assert {r["group"] for r in b.predict(ds.X_eval)} <= {"comp", "rec"}
+    assert not b.notes, b.notes
+
+
+def test_a_format_1_bundle_says_its_group_map_is_missing(tmp_path):
+    """Older bundles have no map. `predict` still runs and warns, rather than
+    silently answering at a coarse rank the model was never measured with."""
+    from narrowcast import predict as P
+    out, _, _, _ = _built(tmp_path, ["comp.graphics", "comp.windows.x", "rec.autos"],
+                          ["comp", "comp", "rec"])
+    mf = json.loads((out / "manifest.json").read_text())
+    mf["bundle_version"], mf["groups"] = 1, {}
+    (out / "manifest.json").write_text(json.dumps(mf))
+    assert any("first whitespace token" in n for n in P.Bundle(out).notes)
+
+
+def test_render_reports_the_declines_not_just_the_answers(tmp_path):
+    """A run that declines most of its input is working as fitted; a caller shown
+    only the answered rows would never know."""
+    from narrowcast import predict as P
+    out, ds, _, _ = _built(tmp_path, ["Sedum acre", "Sedum album", "Bellis annua"],
+                           ["Sedum", "Sedum", "Bellis"])
+    rows = _rows(["Sedum acre"] * len(ds.X_eval), ["Sedum"] * len(ds.X_eval))
+    text = P.render(P.Bundle(out).predict(ds.X_eval), rows, limit=3)
+    assert "named to a label" in text and "declined" in text

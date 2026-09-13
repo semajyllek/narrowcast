@@ -3,9 +3,10 @@
 **A small classifier over a narrow label set, and the truth about how it will fail.**
 
 ```bash
-narrowcast plan  --species my.txt --budget 20
-narrowcast build --images ./photos --background-images ./other --out models/mine
-narrowcast card  models/mine
+narrowcast plan    --species my.txt --budget 20
+narrowcast build   --images ./photos --background-images ./other --out models/mine
+narrowcast card    models/mine
+narrowcast predict models/mine --images ./new-photos
 ```
 
 Training a classifier on your own classes is commodity — a dozen tools do it.
@@ -197,7 +198,7 @@ popularity, which is a weak proxy for fitness: a plant query returns mostly
 `build` and `card` decide. That division is deliberate — the search does not need
 to be clever when evaluating a candidate honestly is cheap.
 
-## Three commands
+## Four commands
 
 **`plan`** — seconds, no training, no downloads. Finds crowded groups and names
 the siblings you left *outside* the set (the weakest rejection case, since no
@@ -211,6 +212,31 @@ evaluates against held-out data, and writes a bundle plus a card.
 **`card`** — the report. Coverage, precision, label-level share, per-bucket
 behaviour, cluster-bootstrapped intervals, and a **gate** on labels you declared
 consequential.
+
+**`predict`** — run the model, answering the way the card says it answers.
+
+```bash
+narrowcast predict models/mine --images ./new-photos
+```
+
+```
+IMG_4417.jpg    Sedum acre              0.969
+IMG_4418.jpg    Sedum (group only)      0.941
+IMG_4419.jpg    declined                0.612
+
+972 rows — 316 named to a label (32.5%), 587 answered at group only, 69 declined
+```
+
+Three answers, not one. A bare argmax would report a label for all 972 rows and
+throw away the only thing that makes a narrow-catalogue model honest — the option
+to answer at the coarse rank, or not at all. **The summary line is the point**: a
+run that answers 60% of its rows at group level is working exactly as fitted, and
+a caller shown only the confident rows would never know.
+
+The scores are recomputed from the saved weights and the decision uses the two
+thresholds exactly as fitted, so **a prediction and the card cannot disagree** —
+pinned by a test that checks both against the same arithmetic the measurement
+used.
 
 ## Consequential labels
 
