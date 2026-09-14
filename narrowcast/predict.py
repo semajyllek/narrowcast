@@ -41,6 +41,12 @@ class Bundle:
         path = Path(path)
         self.path = path
         self.manifest = json.loads((path / "manifest.json").read_text())
+        if not self.manifest.get("has_head", True):
+            raise ValueError(
+                f"{path} is an audit of a model this tool did not fit "
+                f"(source: {self.manifest.get('source')!r}), so it carries "
+                "measurements but no weights. Run `narrowcast card` on it; "
+                "to predict, use the model you audited.")
         z = np.load(path / "head.npz", allow_pickle=True)
         self.coef, self.intercept = z["coef"], z["intercept"]
         self.classes = z["classes"].astype(str)
@@ -112,26 +118,22 @@ class Bundle:
         return out
 
 
-def embed(bundle: Bundle, images=None, manifest=None, embeddings=None):
-    """Vectors for the rows to classify, and the paths they came from."""
+def embed(bundle: Bundle, embeddings=None):
+    """Vectors for the rows to classify.
+
+    Narrowed with the rest of the tool: there is no encoder here any more, so the
+    only way in is vectors produced by the same encoder the bundle names. Handing
+    a directory of photographs to something that cannot open one would fail late
+    and confusingly, so it is not accepted at all.
+    """
     from narrowcast import sources
 
-    given = [k for k, v in (("--images", images), ("--manifest", manifest),
-                            ("--embeddings", embeddings)) if v]
-    if len(given) != 1:
-        raise ValueError("give exactly one of --images DIR, --manifest FILE or "
-                         "--embeddings FILE" +
-                         (f"; got {', '.join(given)}" if given else ""))
-    # Unlabelled, because the labels are the question. `sources.load` routes
-    # --images at the DIR/<label>/*.jpg training layout, which would require a
-    # subdirectory per photograph here.
-    rows = (sources.from_unlabelled(images) if images
-            else sources.load(manifest=manifest, embeddings=embeddings))
-    if rows.descriptor is not None:
-        return np.asarray(rows.descriptor, dtype="float32"), rows
-    from narrowcast.encode import embed_images, load_encoder
-    model, preprocess, device = load_encoder(bundle.encoder)
-    return embed_images(list(rows.path), model, preprocess, device), rows
+    if not embeddings:
+        raise ValueError("give --embeddings FILE: vectors from the same encoder "
+                         f"the bundle was built on ({bundle.encoder!r}). "
+                         "narrowcast does not encode.")
+    rows = sources.from_embeddings(embeddings)
+    return np.asarray(rows.descriptor, dtype="float32"), rows
 
 
 def render(results, rows, limit=0) -> str:

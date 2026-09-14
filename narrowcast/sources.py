@@ -1,17 +1,16 @@
 """Where the tool gets data from. Nothing here knows what a plant is.
 
-The tool takes a dataset; it does not go and find one. Fetching from
-iNaturalist, GBIF or anywhere else lives in whatever project owns that domain
-(`analysis/` here, an app repo elsewhere), because the choice of corpus, its
-licensing and its taxonomy are domain decisions and the tool has no business
-making them.
+narrowcast audits a classifier; it does not build an encoder and it never reads
+a pixel. Both ways in are self-contained `.npz` files, in increasing order of
+"I have already done the work":
 
-Three ways in, in increasing order of "I have already done the work":
-
-    --images DIR          DIR/<label>/*.jpg   (training; `predict` takes a flat
-                          folder instead, since there the labels are the question)
-    --manifest FILE       parquet/csv with columns: label, path [, group, cluster, origin]
-    --embeddings FILE     .npz with arrays: descriptor, label [, group, cluster, origin]
+    --embeddings FILE     descriptor, label [, group, cluster, origin]
+                          Vectors from whatever encoder you chose. A linear head
+                          is fitted over them, then the thresholds.
+    --scores FILE         proba, classes, label [, group, cluster, origin]
+                          Per-row posteriors from a model you already have. Only
+                          the thresholds are fitted. Nothing about your model is
+                          assumed beyond "it returns a distribution over labels".
 
 `cluster` is the unit that must not straddle a train/test split -- several
 photographs of one individual, one specimen, one manufacturing run. Supply it
@@ -25,9 +24,14 @@ Linnaean binomials and often right elsewhere.
 device, a skin-type band, a speaker group. It is optional and nothing requires
 it. Supply it when your rows come from more than one, because labels that have
 training rows from the *deployment* origin and labels that do not are not
-comparable, and the ones that do not are measurably worse off. `build` measures
+comparable, and the ones that do not are measurably worse off. `audit` measures
 that cost when `--deployment-origin` names which one you will actually see; see
 `build.origin_cost`.
+
+There used to be `--images DIR` and `--manifest FILE` here. Both existed to point
+at pixels for an encoder this tool no longer carries, and a manifest of paths
+without an encoder promises something that cannot happen -- so they are gone
+rather than left to fail late.
 """
 
 from dataclasses import dataclass, field
@@ -35,9 +39,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-
 
 @dataclass
 class Rows:
@@ -50,6 +51,8 @@ class Rows:
     origin: np.ndarray | None = None        # acquisition source / population, optional
     has_clusters: bool = True
     notes: list[str] = field(default_factory=list)
+    proba: np.ndarray | None = None     # set by `from_scores` only
+    classes: np.ndarray | None = None   # column order of `proba`
 
     def __len__(self):
         return len(self.label)
@@ -105,65 +108,6 @@ def _finish(label, path=None, descriptor=None, group=None, cluster=None, notes=N
                 descriptor, origin, has_clusters, notes)
 
 
-def from_images(root) -> Rows:
-    """DIR/<label>/*.jpg — the least-effort layout."""
-    root = Path(root)
-    if not root.is_dir():
-        raise FileNotFoundError(f"{root} is not a directory")
-    labels, paths = [], []
-    for sub in sorted(p for p in root.iterdir() if p.is_dir()):
-        for f in sorted(sub.iterdir()):
-            if f.suffix.lower() in IMAGE_SUFFIXES:
-                labels.append(sub.name.replace("_", " "))
-                paths.append(str(f))
-    if not labels:
-        raise ValueError(f"no images under {root} — expected {root}/<label>/*.jpg")
-    return _finish(labels, path=paths,
-                   notes=[f"{len(set(labels))} labels from subdirectory names under {root}"])
-
-
-UNKNOWN = "__UNKNOWN__"
-
-
-def from_unlabelled(root) -> Rows:
-    """Every image under DIR, at any depth, with no labels required.
-
-    `from_images` expects `DIR/<label>/*.jpg`, which is the right contract for
-    *training* data and the wrong one for inference: at predict time the labels
-    are what you are asking for, so demanding them in the directory layout would
-    make a user invent a subdirectory per photograph to classify a folder.
-
-    Files are sorted so a run is reproducible, and subdirectories are walked
-    rather than required -- a flat folder and an already-sorted one both work, and
-    neither is read as a label.
-    """
-    root = Path(root)
-    if not root.is_dir():
-        raise FileNotFoundError(f"{root} is not a directory")
-    paths = sorted(str(f) for f in root.rglob("*")
-                   if f.is_file() and f.suffix.lower() in IMAGE_SUFFIXES)
-    if not paths:
-        raise ValueError(f"no images under {root} (looked for "
-                         f"{', '.join(sorted(IMAGE_SUFFIXES))} at any depth)")
-    return _finish([UNKNOWN] * len(paths), path=paths,
-                   notes=[f"{len(paths)} unlabelled images from {root}"])
-
-
-def from_manifest(path) -> Rows:
-    """A table with `label` and `path`, optionally `group`, `cluster` and `origin`."""
-    path = Path(path)
-    df = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path)
-    cols = {c.lower(): c for c in df.columns}
-    for required in ("label", "path"):
-        if required not in cols:
-            raise ValueError(f"{path} needs a '{required}' column; found {list(df.columns)}")
-    return _finish(df[cols["label"]], path=df[cols["path"]],
-                   group=df[cols["group"]] if "group" in cols else None,
-                   cluster=df[cols["cluster"]] if "cluster" in cols else None,
-                   origin=df[cols["origin"]] if "origin" in cols else None,
-                   notes=[f"{len(df)} rows from {path.name}"])
-
-
 def from_embeddings(path) -> Rows:
     """Precomputed vectors: skips the encoder entirely."""
     z = np.load(Path(path), allow_pickle=True)
@@ -181,14 +125,66 @@ def from_embeddings(path) -> Rows:
                    notes=[f"{len(z['descriptor'])} precomputed embeddings from {Path(path).name}"])
 
 
-def load(images=None, manifest=None, embeddings=None) -> Rows:
+def from_scores(path) -> Rows:
+    """Per-row posteriors from a model that is not ours.
+
+    This is the audit path. The caller has a classifier; what they do not have is
+    an honest account of what it will do in front of a user. `proba` is one row
+    per observation and one column per entry of `classes`, and nothing beyond
+    "the columns are a distribution over `classes`" is assumed about how it was
+    produced -- a logistic head, a fine-tuned network, an ensemble, a vendor API.
+
+    Rows are *not* required to sum to 1. A model that abstains by leaving mass
+    unassigned, or one whose scores are calibrated to something other than a
+    simplex, is still auditable; the cascade reads the largest label mass and the
+    largest group mass, and both are order-preserving under a positive rescale.
+    """
+    z = np.load(Path(path), allow_pickle=True)
+    for required in ("proba", "classes"):
+        if required not in z.files:
+            raise ValueError(f"{path} has no {required!r} array; found {z.files}")
+    label = z["label"] if "label" in z.files else None
+    if label is None:
+        raise ValueError(f"{path} has no 'label' array (the truth column); "
+                         f"found {z.files}")
+    proba, classes = np.asarray(z["proba"], float), np.asarray(z["classes"], dtype=str)
+    if proba.ndim != 2:
+        raise ValueError(f"'proba' must be 2-D (rows x classes); got shape {proba.shape}")
+    if proba.shape[0] != len(label):
+        raise ValueError(f"'proba' has {proba.shape[0]} rows but 'label' has "
+                         f"{len(label)}; they must line up")
+    if proba.shape[1] != len(classes):
+        raise ValueError(f"'proba' has {proba.shape[1]} columns but 'classes' has "
+                         f"{len(classes)} entries; they must line up")
+    if (proba < 0).any():
+        raise ValueError("'proba' contains negative values; the cascade reads these "
+                         "as label and group mass, which must be non-negative")
+    unknown = sorted(set(np.asarray(label, dtype=str).tolist()) - set(classes.tolist()))
+    cluster = z["cluster"] if "cluster" in z.files else (
+        z["obs_id"] if "obs_id" in z.files else None)
+    notes = [f"{len(proba)} scored rows over {len(classes)} classes from {Path(path).name}"]
+    if unknown:
+        # Not an error: rows whose truth is outside `classes` are exactly the
+        # out-of-list observations the decline threshold is fitted to reject, and
+        # an audit without them cannot measure declining at all.
+        notes.append(f"{len(unknown)} label(s) not among `classes` — treated as "
+                     f"out-of-list: {', '.join(unknown[:4])}"
+                     + (" ..." if len(unknown) > 4 else ""))
+    r = _finish(label, descriptor=None,
+                group=z["group"] if "group" in z.files else None,
+                cluster=cluster,
+                origin=z["origin"] if "origin" in z.files else None,
+                notes=notes)
+    r.proba, r.classes = proba, classes
+    return r
+
+
+def load(embeddings=None, scores=None) -> Rows:
     """Exactly one source, or a clear error saying so."""
     given = [(k, v) for k, v in
-             (("--images", images), ("--manifest", manifest), ("--embeddings", embeddings)) if v]
+             (("--embeddings", embeddings), ("--scores", scores)) if v]
     if len(given) != 1:
-        raise ValueError("give exactly one of --images DIR, --manifest FILE or "
-                         "--embeddings FILE" +
+        raise ValueError("give exactly one of --embeddings FILE or --scores FILE" +
                          (f"; got {', '.join(k for k, _ in given)}" if given else ""))
     kind, value = given[0]
-    return {"--images": from_images, "--manifest": from_manifest,
-            "--embeddings": from_embeddings}[kind](value)
+    return {"--embeddings": from_embeddings, "--scores": from_scores}[kind](value)

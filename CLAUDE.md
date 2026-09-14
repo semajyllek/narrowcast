@@ -1,19 +1,25 @@
 # narrowcast — orientation for a new session
 
-A small classifier over a narrow label set, and the truth about how it will fail.
-Public, MIT, pip-installable, 65 tests, CI on 3.10/3.12/3.13.
+**Audit a classifier over a narrow label set, and the truth about how it will
+fail.** Public, MIT, pip-installable, 77 tests, CI on 3.10/3.12/3.13.
 
 Extracted from [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid), which remains
 the research record — **every number in the README traces to a findings doc
-there**, and that is where new measurements belong.
+there**, and that is where new measurements belong. `DISPOSITION.md` there argues
+why this package is now the shape it is.
 
 ## The one thing that is easy to get wrong
 
-**This is an evaluation tool that happens to build a model, not a training
-framework.** The encoder is always frozen and always someone else's. What gets
-built is a logistic head plus two thresholds — ~40 KB against an encoder of
-17.9–152 MB. Personalisation is the head; nothing here trains a backbone, and
-`PRUNE_FINDINGS.md` in narrowcast-plantid is the measurement saying it should not try.
+**This measures a model; it does not build one.** As of 0.2.0 there is no
+encoder, no encoder registry, no Hub search, no candidate sweep, no task config
+and no projection — 833 lines removed, and every failure in the project's history
+lived in them. The caller brings posteriors (`--scores`) or vectors
+(`--embeddings`); what this fits is at most a logistic head plus two thresholds.
+Nothing here trains a backbone, and `PRUNE_FINDINGS.md` in narrowcast-plantid is
+the measurement saying it should not try.
+
+The older framing — "an evaluation tool that happens to build a model" — was
+already the honest half of what shipped. The half that built things is gone.
 
 ## Why it exists
 
@@ -28,15 +34,23 @@ So no report ever prints coverage without the label-level share beside it.
 
 | module | does only |
 |---|---|
-| `sources.py` | images / manifest / embeddings → `Rows`. **The tool never fetches.** |
-| `encode.py` | frozen encoder loading, batched embedding. Torch is an optional extra. |
+| `sources.py` | embeddings / scores → `Rows`. **The tool never fetches and never encodes.** |
 | `cascade.py` | label/group/decline, declared `UTILITY`, threshold fitting, clustered splits, cluster bootstrap |
-| `build.py` | head, per-row scores, measurement, hazard union, bundle |
+| `build.py` | head (embeddings path only), per-row scores, measurement, hazard union, bundle |
 | `card.py` | the report, the consequential-label gate, and the origin-composition section |
-| `sweep.py` | run N candidates, return a frontier, decide or refuse |
-| `config.py` | parse/validate a task config |
-| `hub.py` | find candidate encoders on HF, **size-verified locally**. Maintenance only — no build path calls it |
-| `plan.py` / `projection.py` | pre-compute warnings; projection gated behind `profiles/` |
+| `labels.py` | label-list parsing and composition analysis |
+| `predict.py` | run a bundle *this tool fitted*; refuses an audit bundle by name |
+| `cli.py` | `audit` / `card` / `predict` |
+
+**One measurement path, deliberately.** `build.score_frame` delegates to
+`build.frame_from_posteriors`, which is also what the `--scores` path calls. A
+model we fitted and a model we merely audited therefore go through identical code;
+if that ever forks, the two can drift apart silently and the card stops meaning
+one thing. Pinned by a test.
+
+**An audit bundle has no head.** `save_bundle(clf=None)` writes no `head.npz` and
+records `has_head: false`, and `predict.Bundle` refuses it with a message saying
+why. We measured someone else's model; we did not obtain a copy of it.
 
 ## Conventions that are load-bearing
 
@@ -48,29 +62,25 @@ So no report ever prints coverage without the label-level share beside it.
   gave a 22–77% interval around a 96.1% point estimate.
 - **Declare utilities before fitting.** `cascade.UTILITY` is fixed in source.
   Changing it is a deliberate act with a written reason.
-- **Refuse rather than mislead.** `fit` exits 1 and writes no bundle when nothing
-  clears the floor. `plan` will not project without a domain profile. `fit` will
-  not sweep encoders over an `--embeddings` source, because that scores identical
-  numbers N times and calls it a comparison.
-- **`fit` and `build` never touch the network.** The encoder is whatever the
-  config names, else the built-in registry within budget, so a candidate set is
-  reproducible tomorrow. `constraints.domain` used to trigger a Hub search here
-  and could never contribute a usable candidate — `encode.load_encoder` resolves
-  variants against its own table and raises on a repo id, so every discovered
-  candidate failed inside `sweep.evaluate` and was swallowed by its per-candidate
-  handler. Discovery is now `narrowcast encoders`, a maintenance command;
-  adopting a model is a deliberate edit to `encode.ENCODERS` and
-  `encoders.ENCODERS`. A config still carrying `domain` gets a printed note
-  rather than a silent no-op.
+- **Refuse rather than mislead.** `audit` exits on a source with no in-list rows.
+  `predict` refuses an audit bundle by name instead of failing on a missing
+  `head.npz`. `--deployment-origin` prints that it was *not measured* under
+  `--scores` rather than reporting a silent null — it refits a head twice and
+  there is no head. `--background-embeddings` is rejected under `--scores`
+  instead of ignored, because the negatives are already in the file.
+- **Nothing here touches the network, and nothing reads a pixel.** That used to
+  need saying about `fit` and `build`; now it is structural. There is no encoder
+  to load, so there is no registry to resolve against, no Hub to search, and no
+  size to claim on the card. `--encoder-name` is a string the caller declares for
+  the record, and the card prints it back with "size not stated".
 - **The caller's `group` column wins.** The default first-whitespace-token rule is
   a Latin-binomial convention; it silently disabled the group rank for every
   non-binomial domain until fixed. Pinned by a test.
 
 ## Traps that have already bitten
 
-- Torch must stay optional. CI installs `[dev]` and **not** `[encode]` on purpose.
-- The Hub's `num_parameters` filter leaks over-budget models. Verify size
-  client-side from `safetensors.total`; unknown size is not "fits".
+- Torch is not a dependency at any level and there is no `[encode]` extra. CI
+  installs `[dev]` only, which is now the whole story rather than a discipline.
 - BSD `sed` does not support `\b`, which silently half-completed a bulk rename.
 - `git merge -F -` does not read stdin; it fails and a following `push` succeeds
   as a no-op.
@@ -104,12 +114,14 @@ collinearity. Anything keyed on K rather than on measured top-1 is keyed to a
 proxy: at K=10 plants show *exactly zero* intervention damage and dermatology
 loses 13.5pp. **"Small label sets are safe" is false in general.**
 
-**`plan` cannot do this, and an earlier version of this file wrongly said it
-could.** `cmd_plan` takes a list of label strings; it never loads an image, a
-vector or a fitted head, and `projection` interpolates a shipped grid. Headroom
-needs a fitted head and a calibration split, which exist only inside
-`fit_and_measure`. `plan`'s warning is structural and says so; the card's is
-measured.
+**Headroom needs data, which is why `plan` is gone.** `plan` took a list of
+label strings — it never loaded an image, a vector or a fitted head, and
+`projection` interpolated a shipped grid measured on 530 plant species. An
+earlier version of this file wrongly claimed `plan` could compute headroom; it
+could not, because headroom needs scores and a calibration split, which exist
+only inside `fit_and_measure`. A structural warning issued before any data
+arrives was the weakest thing here and the easiest to mistake for a measurement,
+so 0.2.0 drops it rather than keeping two grades of warning that read alike.
 
 - **Headroom predicts *retreat*, not *harm*.** Group answers come out of
   declines (coverage inflates, quality holds) or out of label answers (quality

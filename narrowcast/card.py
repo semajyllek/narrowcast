@@ -14,7 +14,6 @@ it will confuse, and what it cannot do.
 import json
 from pathlib import Path
 
-from narrowcast.encoders import BY_VARIANT
 
 
 def _pct(x):
@@ -356,12 +355,13 @@ def _origin_section(oc: dict | None) -> list:
 def render(manifest: dict) -> str:
     m = manifest["metrics"]
     comp = manifest["composition"]
-    enc = BY_VARIANT.get(manifest["encoder"])
-    # An encoder this tool never ran has no size it can state. Quoting the
-    # registry's bytes for a precomputed vector file would attach a fabricated
+    # An encoder this tool never ran has no size it can state, and it never runs
+    # one: `encoder` is a string the caller declared for the record. There used to
+    # be a registry lookup here with a fallback for precomputed vectors; every
+    # build is now that case, so the fallback is the only branch and the registry
+    # is gone. Quoting bytes for a model we did not load would attach a fabricated
     # number to the artifact whose whole job is being checkable.
-    sizing = (f"{enc.size_mb():.1f} MB int4" if enc else
-              "size not stated — vectors were precomputed elsewhere")
+    sizing = "size not stated — scored outside this tool"
 
     L = [
         f"# Model card — {comp['n_labels']} labels",
@@ -469,10 +469,14 @@ def render(manifest: dict) -> str:
     if counts.get("missing_organs"):
         L.append(f"- No embeddings were available for: "
                  f"{', '.join(counts['missing_organs'])}. Built from the rest.")
+    # `rows_per_label` is None on an audited model -- we were handed posteriors,
+    # never its training set -- so this must survive the key being present and
+    # null, not merely absent.
+    rpl = counts.get("rows_per_label") or {}
     L += ["", "---", "",
-          f"Training rows {counts.get('train', '?')}"
-          + (f" ({counts['rows_per_label']['median']}/label median)"
-             if counts.get("rows_per_label", {}).get("median") else "")
+          (f"Training rows {counts['train']}" if counts.get("train")
+           else "Training rows not known to this tool")
+          + (f" ({rpl['median']}/label median)" if rpl.get("median") else "")
           + f" · evaluation rows "
           f"{sum(v['n'] for v in m.get('per_bucket', {}).values())} · "
           f"bundle format v{manifest['bundle_version']}"]

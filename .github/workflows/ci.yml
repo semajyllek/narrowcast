@@ -12,8 +12,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      # No [encode] extra on purpose: plan, card, fit and every --embeddings
-      # workflow must run without torch, and CI is where that stays true.
+      # There is no [encode] extra to install. narrowcast never turns images
+      # into vectors, so torch is not a dependency at any level, and CI is where
+      # that stays true.
       - run: pip install -e '.[dev]'
       - run: pytest -q
       - name: console script is installed and runs

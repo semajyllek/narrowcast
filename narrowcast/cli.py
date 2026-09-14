@@ -1,15 +1,20 @@
-"""narrowcast — a small classifier over a narrow label set, and the truth about it.
+"""narrowcast — audit a classifier over a narrow label set.
 
-    narrowcast fit      --config task.yaml --out models/mine
-    narrowcast plan     --labels my.txt --budget 20
-    narrowcast build    --images ./photos --out models/mine
-    narrowcast card     models/mine
+    narrowcast audit --scores     scores.npz  --out models/mine
+    narrowcast audit --embeddings vecs.npz    --out models/mine
+    narrowcast card    models/mine
+    narrowcast predict models/mine --embeddings new.npz
 
-    narrowcast encoders --domain plant --budget 50    # maintenance only
+narrowcast does not choose an encoder, fetch a dataset, or read a pixel. You
+bring a model's posteriors (`--scores`) or vectors it can fit a linear head over
+(`--embeddings`), and it tells you what you actually have: the three-way split of
+label / group / decline, at a prevalence you declare rather than one your
+evaluation set happened to contain.
 
-`fit` and `build` never touch the network: the encoder is whatever the config
-names, or the built-in registry within the budget. `encoders` searches the Hub
-for a human refreshing that registry, and nothing it prints is directly usable.
+It used to try to build the model for you -- searching encoders under a size
+budget, projecting outcomes from a shipped grid, discovering candidates on the
+Hub. That is gone. See `docs/deep_dive.html` and `DISPOSITION.md` in
+narrowcast-plantid for why the measurement was the part worth keeping.
 """
 
 import argparse
@@ -19,37 +24,8 @@ from pathlib import Path
 
 from narrowcast import build as B
 from narrowcast import card as C
-from narrowcast import build as B  # noqa: F811
-from narrowcast import config as CFG
-from narrowcast import encoders, hub as HUB, labels as S, plan as P
-from narrowcast import predict as PRED, sources as SRC, sweep as SW
-
-
-def _species_arg(args) -> list[str]:
-    if args.labels:
-        return S.read_list(args.labels)
-    if args.name:
-        out = []
-        for n in args.name:
-            c = S.canonical(n)
-            if not c:
-                raise ValueError(f"could not parse {n!r} as 'Genus labels'")
-            out.append(c)
-        return list(dict.fromkeys(out))
-    raise ValueError("give --labels FILE, or one or more --name LABEL")
-
-
-def cmd_plan(args):
-    chosen = _species_arg(args)
-    pl = P.make_plan(chosen, budget_mb=args.budget, p_ood=args.ood_rate,
-                     encoder=args.encoder)
-    print()
-    print(P.render(pl))
-    print()
-    print(f"  Next: narrowcast build --labels {args.labels or '<list>'} "
-          f"--encoder {pl['encoder'].variant}")
-    print()
-    return 0
+from narrowcast import labels as S
+from narrowcast import predict as PRED, sources as SRC
 
 
 def _hazard_arg(args, chosen) -> list[str]:
@@ -58,84 +34,85 @@ def _hazard_arg(args, chosen) -> list[str]:
     if getattr(args, "hazard_file", None):
         out += S.read_list(args.hazard_file)
     out = [S.canonical(h) or h for h in out]
-    unknown = sorted(set(out) - set(chosen))
+    unknown = [h for h in out if h not in set(chosen)]
     if unknown:
-        raise ValueError(f"consequential labels not in your labels list: "
-                         f"{', '.join(unknown)}")
-    return sorted(set(out))
+        raise SystemExit(
+            "these --hazard labels are not in the label set: "
+            + ", ".join(unknown)
+            + "\nA hazard is a label you already have; naming one you do not "
+              "measures nothing.")
+    return out
 
 
-def cmd_build(args):
-    external = args.images or args.manifest or args.embeddings
-    # Precomputed vectors mean the encoder ran somewhere else and this tool never
-    # saw it. Naming one from the registry would put a fabricated provenance --
-    # and a meaningless byte size -- on the card, which is the one artifact that
-    # has to be trustworthy. Found by building an audio model from wav2vec2
-    # vectors: the card claimed `mobileclip2_s0` at 5.7 MB int4, an image encoder
-    # that had nothing to do with it.
-    precomputed = bool(args.embeddings)
-    if precomputed:
-        enc = None
-        encoder_name = args.encoder_name or "precomputed"
-        if args.encoder:
-            print("  note: --encoder is ignored with --embeddings; the vectors "
-                  "already fix the encoder. Use --encoder-name to record which.",
-                  file=sys.stderr)
+def cmd_audit(args):
+    rows = SRC.load(embeddings=args.embeddings, scores=args.scores)
+    scored = args.scores is not None
+
+    if scored:
+        if args.background_embeddings:
+            raise SystemExit(
+                "--background-embeddings is for --embeddings only. With --scores "
+                "the out-of-list rows are already in the file: any row whose "
+                "label is not among `classes` is one, and it is bucketed by group.")
+        chosen = sorted(set(rows.classes.tolist()))
+        ds = B.load_scored(rows)
+        source = args.scores
     else:
-        enc = (encoders.BY_VARIANT[args.encoder] if args.encoder
-               else encoders.choose(args.budget))
-        encoder_name = enc.variant
-
-    if external:
-        rows = SRC.load(args.images, args.manifest, args.embeddings)
-        bg = (SRC.load(args.background_images, args.background_manifest,
-                       args.background_embeddings)
-              if (args.background_images or args.background_manifest
-                  or args.background_embeddings) else None)
+        bg = (SRC.from_embeddings(args.background_embeddings)
+              if args.background_embeddings else None)
         chosen = rows.labels
-        gmap = dict(zip(rows.label.tolist(), rows.group.tolist()))
-        comp = S.analyse(chosen, pool=chosen, groups=gmap)
-        print(f"encoder {enc.label if enc else encoder_name}, {len(chosen)} "
-              f"labels, {len(rows)} rows", file=sys.stderr)
-        for n in rows.notes:
-            print(f"  note: {n}", file=sys.stderr)
-        ds = B.load_rows(rows, encoder_name, background=bg)
-        source = args.images or args.manifest or args.embeddings
-    else:
-        chosen = _species_arg(args)
-        comp = S.analyse(chosen)
-        print(f"encoder {enc.label} ({enc.size_mb():.1f} MB int4), "
-              f"{len(chosen)} labels", file=sys.stderr)
-        ds = B.load_local(encoder_name, chosen)
-        missing = set(chosen) - set(ds.y_train)
-        if missing:
-            print(f"warning: no training rows for {len(missing)} labels: "
-                  f"{', '.join(sorted(missing)[:6])}", file=sys.stderr)
-        source = "local-catalogue"
+        ds = B.load_rows(rows, args.encoder_name, background=bg)
+        source = args.embeddings
+
+    gmap = dict(zip(rows.label.tolist(), rows.group.tolist()))
+    comp = S.analyse(chosen, pool=chosen, groups=gmap)
+
+    print(f"{len(chosen)} labels, {len(rows)} rows"
+          + (f", posteriors from {args.scores}" if scored else
+             f", vectors from {args.embeddings}"), file=sys.stderr)
+    for n in ds.counts.get("notes", []):
+        print(f"  note: {n}", file=sys.stderr)
     if ds.counts["in_catalog"] == 0:
-        raise SystemExit("no evaluation rows -- nothing to measure")
-    print(f"  train {ds.counts['train']} rows | eval in-list {ds.counts['in_catalog']}, "
+        raise SystemExit("no in-list evaluation rows -- nothing to measure")
+    print(f"  eval in-list {ds.counts['in_catalog']}, "
           f"relatives {ds.counts['near_ood']}, unrelated {ds.counts['distant_ood']}",
           file=sys.stderr)
 
     hazards = _hazard_arg(args, chosen)
-    clf = B.fit_head(ds)
-    frame = B.score_frame(clf, ds)
+
+    if scored:
+        # No head of ours: the posteriors are the model. `frame_from_posteriors`
+        # is the same code `score_frame` runs, so an audited model and a built one
+        # are measured identically and cannot drift apart.
+        clf = None
+        frame = B.frame_from_posteriors(rows.proba, rows.classes, ds)
+    else:
+        clf = B.fit_head(ds)
+        frame = B.score_frame(clf, ds)
+
     metrics = B.fit_and_measure(frame, p_ood=args.ood_rate, hazards=hazards)
 
-    if getattr(args, "deployment_origin", None):
-        metrics["origin_cost"] = B.origin_cost(ds, args.deployment_origin)
-    elif ds.origin_train is not None:
-        origins = sorted(set(ds.origin_train.tolist()) - {B.BG_ORIGIN})
-        print(f"  note: rows carry {len(origins)} origins ({', '.join(origins[:4])}); "
-              "pass --deployment-origin to measure what that costs", file=sys.stderr)
+    if args.deployment_origin:
+        if scored:
+            # `origin_cost` refits the head twice on different row subsets. With
+            # --scores there is no head and no vectors to refit one from, so this
+            # is not a thing that can be measured here -- say so instead of
+            # reporting a silent null.
+            print("  note: --deployment-origin needs vectors to refit a head on; "
+                  "with --scores there is nothing to refit. Not measured.",
+                  file=sys.stderr)
+        else:
+            metrics["origin_cost"] = B.origin_cost(ds, args.deployment_origin)
+    elif ds.origin_eval is not None:
+        origins = sorted(set(ds.origin_eval.tolist()) - {B.BG_ORIGIN})
+        if not scored and len(origins) > 1:
+            print(f"  note: rows carry {len(origins)} origins "
+                  f"({', '.join(origins[:4])}); pass --deployment-origin to "
+                  "measure what that costs", file=sys.stderr)
 
-    # The caller's group column, persisted so `predict` answers at the same coarse
-    # rank the card measured rather than re-deriving it from whitespace.
-    if not external:
-        gmap = {c: S.group_of(c) for c in chosen}
-    out = B.save_bundle(Path(args.out), clf, chosen, encoder_name, metrics, comp,
-                        ds.counts, source=str(source), hazards=hazards, groups=gmap)
+    out = B.save_bundle(Path(args.out), clf, chosen, args.encoder_name, metrics,
+                        comp, ds.counts, source=str(source), hazards=hazards,
+                        groups=gmap)
     card_path = C.write(out)
     print(f"\nbundle {out}\ncard   {card_path}", file=sys.stderr)
     print(f"\n  coverage {100*metrics['coverage']:.1f}%  "
@@ -144,119 +121,12 @@ def cmd_build(args):
     return 0
 
 
-def _candidates(cfg):
-    """Encoders to try: the config's own list, else the built-in registry, both
-    filtered to the size budget.
-
-    This used to append a Hub search when the config named a domain, and that
-    could not work. `encode.load_encoder` resolves a variant against a hard-coded
-    table and raises on anything else, so a discovered repo id like
-    `gerald29/plantclef2024` failed inside `sweep.evaluate`, was swallowed by its
-    per-candidate exception handler, and occupied a `max_candidates` slot with an
-    error row. It bought a network call on every fit and could never contribute a
-    usable candidate.
-
-    Discovery still has value -- `plantclef24` was found that way and became the
-    best result in the parent project -- but as **maintenance**, not as part of a
-    build: run `narrowcast encoders`, evaluate what it finds, and add the good
-    ones to `encoders.ENCODERS` and `encode.ENCODERS` deliberately. That keeps
-    `fit` offline, reproducible, and honest about where a size came from.
-    """
-    if cfg.encoders:
-        return [(e, encoders.BY_VARIANT[e].size_mb() if e in encoders.BY_VARIANT else None)
-                for e in cfg.encoders]
-    built_in = [(e.variant, e.size_mb()) for e in encoders.ENCODERS
-                if cfg.max_size_mb is None or e.size_mb() <= cfg.max_size_mb]
-    return built_in[: cfg.max_candidates]
-
-
-def cmd_fit(args):
-    """Search encoders under a size budget until one clears the metric floor."""
-    cfg = CFG.load(args.config)
-    rows = SRC.load(**cfg.data)
-    background = SRC.load(**cfg.background) if cfg.background else None
-    cands = _candidates(cfg)
-    if not cands:
-        raise SystemExit(f"no candidate encoders fit {cfg.max_size_mb} MB")
-    # `constraints.domain` used to trigger a Hub search here. It no longer selects
-    # anything, and a setting that silently does nothing is worse than one that is
-    # rejected -- so say so rather than let the user believe discovery ran.
-    if cfg.domain and not cfg.encoders:
-        print(f"\n  note: `constraints.domain` no longer selects encoders — `fit` is "
-              f"offline and\n  sweeps the built-in registry. To use a domain-specific "
-              f"model, find one with\n  `narrowcast encoders --domain "
-              f"{' --domain '.join(cfg.domain)}`, add it to the registry, and name "
-              f"it in\n  `constraints.encoders`.", flush=True)
-    # Precomputed vectors pin the encoder: `load_rows` returns them untouched and
-    # never runs a model, so sweeping N encoders over one embeddings file scores
-    # the same numbers N times and calls them a frontier. Refuse rather than
-    # produce a comparison that cannot be real.
-    if "embeddings" in cfg.data and len(cands) > 1:
-        raise SystemExit(
-            f"`data.embeddings` pins the encoder that produced it, so a sweep over "
-            f"{len(cands)} candidates would score identical numbers {len(cands)} times.\n"
-            f"Use `data.images` or `data.manifest` to sweep, or name exactly one "
-            f"encoder in `constraints.encoders`.")
-
-    print(f"\n  task {cfg.task}: {len(rows)} rows, {len(rows.labels)} labels")
-    print(f"  trying {len(cands)} encoder(s) against {cfg.metric} >= {cfg.minimum}\n",
-          flush=True)
-    results = SW.run(cands, rows, background, cfg.metric, cfg.ood_rate, cfg.hazards,
-                     on_result=lambda r: print(
-                         f"    {r.encoder[:38]:38s} "
-                         f"{'failed' if r.error else f'{r.value(cfg.metric):.4f}'}",
-                         file=sys.stderr, flush=True))
-    print()
-    print(SW.render(results, cfg.metric, cfg.minimum, cfg.max_size_mb))
-
-    pick = SW.choose(results, cfg.metric, cfg.minimum)
-    if pick is None:
-        best, gap = SW.shortfall(results, cfg.metric, cfg.minimum)
-        print(f"\n  REFUSED: nothing reached {cfg.metric} >= {cfg.minimum}.")
-        if best is not None:
-            print(f"  Closest was {best.encoder} at {best.value(cfg.metric):.4f}, "
-                  f"short by {gap:.4f}.")
-        print("  No bundle written. Lower the floor, raise the size budget, or "
-              "supply better data.\n")
-        return 1
-
-    print(f"\n  selected {pick.encoder} — smallest that clears the floor\n")
-    ds = B.load_rows(rows, pick.encoder, background=background)
-    clf = B.fit_head(ds)
-    comp = S.analyse(rows.labels, pool=rows.labels,
-                     groups=dict(zip(rows.label.tolist(), rows.group.tolist())))
-    out = B.save_bundle(Path(args.out), clf, rows.labels, pick.encoder, pick.metrics,
-                        comp, ds.counts, source=str(cfg.data), hazards=list(cfg.hazards),
-                        groups=dict(zip(rows.label.tolist(), rows.group.tolist())))
-    print(f"  bundle {out}\n  card   {C.write(out)}\n")
-    return 0
-
-
-def cmd_encoders(args):
-    """Candidate encoders from the Hub, size-verified locally. A **maintenance**
-    command, not part of any build: nothing it prints can be fed straight to
-    `fit`, because `encode.load_encoder` only resolves variants in its own table.
-    Adding one is a deliberate edit to that table and to `encoders.ENCODERS`."""
-    terms = tuple(args.domain or ())
-    print(f"\n  searching the Hub"
-          + (f" for: {', '.join(terms)}" if terms else " (no domain terms)"), flush=True)
-    f, o, u = HUB.search(terms, budget_mb=args.budget)
-    print()
-    print(HUB.render(f, o, u, budget_mb=args.budget, top=args.top))
-    print(f"\n  These are candidates for a human to evaluate, not encoders `fit` "
-          f"can use.\n  To adopt one: add it to `encode.ENCODERS` (how to load it) "
-          f"and\n  `encoders.ENCODERS` (its measured size), then name it in "
-          f"`constraints.encoders`.")
-    print()
-    return 0
-
-
 def cmd_predict(args):
     """Classify rows with a built model, through the same cascade the card measured."""
     b = PRED.Bundle(Path(args.bundle))
     for n in b.notes:
         print(f"  note: {n}", file=sys.stderr)
-    X, rows = PRED.embed(b, args.images, args.manifest, args.embeddings)
+    X, rows = PRED.embed(b, embeddings=args.embeddings)
     results = b.predict(X)
     if args.json:
         out = [{**r, "path": (str(rows.path[i]) if rows.path is not None else None)}
@@ -268,96 +138,68 @@ def cmd_predict(args):
 
 
 def cmd_card(args):
-    manifest = B.load_bundle(Path(args.bundle))
+    d = Path(args.bundle)
+    manifest = json.loads((d / "manifest.json").read_text())
     print(C.render(manifest))
     return 0
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="narrowcast", description=__doc__)
+    ap = argparse.ArgumentParser(prog="narrowcast", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    def common(p, out=False):
-        p.add_argument("--labels", help="file with one label per line")
-        p.add_argument("--images", metavar="DIR", help="DIR/<label>/*.jpg")
-        p.add_argument("--manifest", metavar="FILE",
-                       help="parquet/csv with columns label, path [, group, cluster]")
-        p.add_argument("--embeddings", metavar="FILE",
-                       help="npz with descriptor, label [, group, cluster, origin]")
-        p.add_argument("--name", action="append", help="a label; repeatable")
-        p.add_argument("--budget", type=float, metavar="MB",
-                       help="size budget for the encoder, in MB")
-        p.add_argument("--encoder", choices=sorted(encoders.BY_VARIANT),
-                       help="override the budget-based choice")
-        p.add_argument("--encoder-name", metavar="NAME",
-                       help="with --embeddings: record which encoder produced the "
-                            "vectors. Declared, not verified — the tool never ran it")
-        p.add_argument("--ood-rate", type=float, default=0.2, metavar="P",
-                       help="assumed share of queries not on your list (default 0.2)")
-        if out:
-            p.add_argument("--out", required=True, help="bundle directory to write")
-            p.add_argument("--deployment-origin", metavar="NAME",
-                           help="which `origin` you will actually deploy against; "
-                                "measures what it costs the labels that have no "
-                                "training rows from it")
-            p.add_argument("--hazard", action="append", metavar="LABEL",
-                           help="a label where being mistaken for a harmless one "
-                                "is the costly error; repeatable")
-            p.add_argument("--hazard-file", metavar="FILE",
-                           help="file of such labels, one per line")
-            p.add_argument("--background-images", metavar="DIR")
-            p.add_argument("--background-manifest", metavar="FILE")
-            p.add_argument("--background-embeddings", metavar="FILE",
-                           help="negatives, so the model can learn to decline")
-
-    p_plan = sub.add_parser("plan", help="what this labels list will give you")
-    common(p_plan)
-    p_plan.set_defaults(fn=cmd_plan)
-
-    p_build = sub.add_parser("build", help="fit, measure, and write a bundle")
-    common(p_build, out=True)
-    p_build.set_defaults(fn=cmd_build)
-
-    p_enc = sub.add_parser("encoders",
-                           help="[maintenance] search the Hub for candidate encoders; "
-                                "adopting one is a deliberate edit, not a build step")
-    p_enc.add_argument("--domain", action="append", metavar="TERM",
-                       help="domain term, e.g. plant / car / painting; repeatable")
-    p_enc.add_argument("--budget", type=float, metavar="MB",
-                       help="size budget in MB (int4 assumed)")
-    p_enc.add_argument("--top", type=int, default=12)
-    p_enc.set_defaults(fn=cmd_encoders)
-
-    p_fit = sub.add_parser("fit", help="search encoders under a size budget until "
-                                       "one clears a metric floor")
-    p_fit.add_argument("--config", required=True, help="task config (YAML or JSON)")
-    p_fit.add_argument("--out", required=True, help="bundle directory to write")
-    p_fit.set_defaults(fn=cmd_fit)
+    p_audit = sub.add_parser(
+        "audit", help="measure what a model over a narrow label set will do",
+        description="Fit the two thresholds, measure the three-way split, and "
+                    "write a bundle and a card.")
+    src = p_audit.add_mutually_exclusive_group(required=True)
+    src.add_argument("--scores", metavar="FILE",
+                     help=".npz with proba, classes, label [, group, cluster, "
+                          "origin] — posteriors from a model you already have")
+    src.add_argument("--embeddings", metavar="FILE",
+                     help=".npz with descriptor, label [, group, cluster, origin] "
+                          "— a linear head is fitted over them")
+    p_audit.add_argument("--out", required=True, help="bundle directory to write")
+    p_audit.add_argument("--ood-rate", type=float, default=0.2, metavar="P",
+                         help="assumed share of inputs that are of something not "
+                              "on the list (default 0.2). This chooses the "
+                              "operating point; it is not read off the data.")
+    p_audit.add_argument("--encoder-name", metavar="NAME", default="unstated",
+                         help="what produced the vectors or scores, recorded on "
+                              "the card. No size is claimed for it.")
+    p_audit.add_argument("--background-embeddings", metavar="FILE",
+                         help="negatives, for --embeddings. Without them the "
+                              "model is closed-set and cannot decline.")
+    p_audit.add_argument("--deployment-origin", metavar="NAME",
+                         help="the origin you will actually see, to measure what "
+                              "it costs labels with no training rows from it "
+                              "(--embeddings only)")
+    p_audit.add_argument("--hazard", action="append", metavar="LABEL",
+                         help="a label where being wrong is expensive; repeatable")
+    p_audit.add_argument("--hazard-file", metavar="FILE",
+                         help="file with one such label per line")
+    p_audit.set_defaults(func=cmd_audit)
 
     p_pred = sub.add_parser("predict", help="classify rows with a built bundle")
     p_pred.add_argument("bundle")
-    p_pred.add_argument("--images", metavar="DIR")
-    p_pred.add_argument("--manifest", metavar="FILE")
-    p_pred.add_argument("--embeddings", metavar="FILE")
+    p_pred.add_argument("--embeddings", metavar="FILE", required=True,
+                        help="vectors from the same encoder the bundle names")
     p_pred.add_argument("--json", metavar="FILE", help="write full results as JSON")
     p_pred.add_argument("--limit", type=int, default=20,
-                        help="rows to print; the summary always covers all of them")
-    p_pred.set_defaults(fn=cmd_predict)
+                        help="rows to print; 0 for all")
+    p_pred.set_defaults(func=cmd_predict)
 
     p_card = sub.add_parser("card", help="print the card for a built bundle")
     p_card.add_argument("bundle")
-    p_card.set_defaults(fn=cmd_card)
+    p_card.set_defaults(func=cmd_card)
 
     args = ap.parse_args(argv)
-    if args.cmd == "plan" and args.ood_rate not in P.projection.measured_p_ood():
-        ap.error(f"--ood-rate for `plan` must be one of "
-                 f"{P.projection.measured_p_ood()} (the rates measured); "
-                 f"`build` accepts any value because it fits on your data")
     try:
-        return args.fn(args)
+        return args.func(args)
     except (ValueError, FileNotFoundError) as e:
-        ap.error(str(e))
+        raise SystemExit(str(e))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

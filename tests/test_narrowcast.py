@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from narrowcast import build, cascade, card, encoders, labels, plan, projection, sources
+from narrowcast import build, cascade, card, labels, sources
 
 
 # ---- labels list parsing -------------------------------------------------
@@ -68,96 +68,6 @@ def test_analyse_no_siblings_when_set_is_separated():
     a = labels.analyse(["Bellis perennis"], pool=POOL)
     assert a["in_set_sibling_frac"] == 0.0
     assert a["crowded_groups"] == {} and a["outside_siblings"] == {}
-
-
-# ---- encoder choice -------------------------------------------------------
-
-def test_choose_takes_largest_that_fits():
-    assert encoders.choose(20).variant == "mobileclip2_s2"
-    assert encoders.choose(10).variant == "mobileclip2_s0"
-    assert encoders.choose(1000).variant == "bioclip2"
-    assert encoders.choose(None).variant == "bioclip2"
-
-
-def test_choose_falls_back_to_smallest_when_nothing_fits():
-    assert encoders.choose(1).variant == "mobileclip2_s0"
-
-
-def test_bioclip2_int4_reconciles_with_shipped_artifact():
-    """152 MB against the 160 MB build is the check that the counts are image-tower only."""
-    assert encoders.BY_VARIANT["bioclip2"].size_mb(4) == pytest.approx(152.0)
-
-
-# ---- projection -----------------------------------------------------------
-
-def test_project_matches_measured_cell_at_an_anchor():
-    anchors = projection.GRID["sibling_anchors"]["20"]
-    p = projection.project("mobileclip2_s2", 20, anchors["easy"], p_ood=0.2)
-    assert p["coverage"] == pytest.approx(0.771, abs=1e-6)
-    assert p["label_share"] == pytest.approx(0.833, abs=1e-6)
-
-
-def test_sibling_dense_sets_project_lower_label_share():
-    a = projection.GRID["sibling_anchors"]["20"]
-    easy = projection.project("bioclip2", 20, a["easy"])
-    hard = projection.project("bioclip2", 20, a["hard"])
-    assert hard["label_share"] < easy["label_share"]
-    # ...while coverage looks *better*, which is the trap the tool exists to flag
-    assert hard["coverage"] > easy["coverage"]
-
-
-def test_project_clamps_rather_than_extrapolating():
-    p = projection.project("bioclip2", 3, 0.0)
-    assert p["K_used"] == 10 and p["extrapolated"] == "below"
-    p = projection.project("bioclip2", 400, 0.0)
-    assert p["K_used"] == 50 and p["extrapolated"] == "above"
-
-
-def test_project_rejects_unmeasured_prevalence():
-    with pytest.raises(ValueError, match="not measured"):
-        projection.project("bioclip2", 20, 0.2, p_ood=0.33)
-
-
-# ---- plan -----------------------------------------------------------------
-
-def test_plan_warns_on_crowded_groups():
-    pl = plan.make_plan(["Sedum acre", "Sedum album", "Sedum dasyphyllum"],
-                        budget_mb=20, pool=POOL)
-    kinds = {w.kind for w in pl["warnings"]}
-    assert "crowded" in kinds and "outside_siblings" in kinds
-    assert "label-level" in plan.render(pl)
-
-
-def test_plan_warns_about_label_it_has_no_images_for():
-    """A confident projection for a list `build` will drop is the worst failure here."""
-    pl = plan.make_plan(["Sedum acre", "Conium maculatum"], budget_mb=20, pool=POOL)
-    w = {x.kind: x for x in pl["warnings"]}
-    assert "missing" in w and "Conium maculatum" in w["missing"].detail
-    assert pl["n_available"] == 1
-
-
-def test_plan_refuses_to_project_when_most_of_the_list_is_absent():
-    pl = plan.make_plan(["Conium maculatum", "Cicuta virosa", "Sedum acre"],
-                        budget_mb=20, pool=POOL)
-    assert pl["projection"] is None
-    assert "unprojectable" in {x.kind for x in pl["warnings"]}
-    assert "No projection" in plan.render(pl)
-
-
-def test_plan_reports_budget_shortfall():
-    """Names the next step up, which is PlantCLEF2024 at 43.3 MB, not BioCLIP-2."""
-    pl = plan.make_plan(["Bellis perennis"], budget_mb=20, pool=POOL)
-    assert "43.3 MB" in pl["budget_note"]
-    assert pl["encoder"].variant == "mobileclip2_s2"
-
-
-def test_choose_ranks_storage_and_cannot_see_latency():
-    """PlantCLEF2024 is a third of BioCLIP-2's bytes and twice its latency."""
-    assert encoders.choose(50).variant == "plantclef24"
-    assert encoders.choose(200).variant == "bioclip2"
-    pc = encoders.BY_VARIANT["plantclef24"]
-    bc = encoders.BY_VARIANT["bioclip2"]
-    assert pc.size_mb() < bc.size_mb() and pc.ms_per_image > bc.ms_per_image
 
 
 # ---- card -----------------------------------------------------------------
@@ -349,34 +259,20 @@ def test_bundle_stores_the_group_map_for_predict(tmp_path):
 
 # ---- data sources: the tool takes a dataset, it does not fetch one ---------
 
-def test_images_layout_reads_labels_from_directory_names(tmp_path):
-    for label in ("Sedum acre", "weld porosity"):
-        d = tmp_path / label.replace(" ", "_")
-        d.mkdir()
-        (d / "a.jpg").write_bytes(b"x")
-    r = sources.from_images(tmp_path)
-    assert r.labels == ["Sedum acre", "weld porosity"] and len(r) == 2
-
-
-def test_manifest_requires_label_and_path(tmp_path):
-    f = tmp_path / "m.csv"
-    f.write_text("label,notpath\na,b\n")
-    with pytest.raises(ValueError, match="needs a 'path' column"):
-        sources.from_manifest(f)
-
-
 def test_missing_cluster_is_recorded_not_silently_assumed(tmp_path):
-    f = tmp_path / "m.csv"
-    f.write_text("label,path\na,/x.jpg\nb,/y.jpg\n")
-    r = sources.from_manifest(f)
+    f = tmp_path / "v.npz"
+    np.savez(f, descriptor=np.zeros((2, 4), dtype="float32"),
+             label=np.array(["a", "b"]))
+    r = sources.from_embeddings(f)
     assert r.has_clusters is False
     assert any("treated as independent" in n for n in r.notes)
 
 
 def test_group_defaults_to_first_token_and_is_overridable(tmp_path):
-    f = tmp_path / "m.csv"
-    f.write_text("label,path,group\nSedum acre,/x.jpg,Crassulaceae\n")
-    assert list(sources.from_manifest(f).group) == ["Crassulaceae"]
+    f = tmp_path / "v.npz"
+    np.savez(f, descriptor=np.zeros((1, 4), dtype="float32"),
+             label=np.array(["Sedum acre"]), group=np.array(["Crassulaceae"]))
+    assert list(sources.from_embeddings(f).group) == ["Crassulaceae"]
     assert sources.default_group("Sedum acre") == "Sedum"
 
 
@@ -384,20 +280,7 @@ def test_exactly_one_source_required():
     with pytest.raises(ValueError, match="exactly one"):
         sources.load()
     with pytest.raises(ValueError, match="exactly one"):
-        sources.load(images="a", manifest="b")
-
-
-# ---- projection is gated behind a measured profile -------------------------
-
-def test_projection_refuses_without_a_profile_for_the_domain():
-    """Birds licensed the warning, not the numbers."""
-    with pytest.raises(ValueError, match="projection is disabled"):
-        projection.project("bioclip2", 20, 0.2, profile="fungi-bioclip2")
-
-
-def test_default_plant_profile_still_resolves():
-    assert "plants-bioclip2" in projection.available()
-    assert projection.project("bioclip2", 20, 0.229)["profile"] == "plants-bioclip2"
+        sources.load(embeddings="a", scores="b")
 
 
 # ---- non-binomial labels are first-class ----------------------------------
@@ -414,127 +297,11 @@ def test_read_list_still_normalises_a_pure_binomial_list(tmp_path):
     assert labels.read_list(f) == ["Sedum acre", "Trifolium repens"]
 
 
-# ---- hub search: candidate generation, size verified locally ---------------
-
-from narrowcast import hub  # noqa: E402
-
-
-def test_whole_token_match_does_not_reach_substrings():
-    """'art' must not match 'artifact' — it put brain-tumour models atop an art query."""
-    assert hub._matched_terms("roychowdhuryresearch/HFO-artifact", ("art",)) == ()
-    assert hub._matched_terms("lyfesan/vit-brats-artifact-classifier", ("art",)) == ()
-    assert hub._matched_terms("somebody/cardiac-mri", ("car",)) == ()
-
-
-def test_long_terms_prefix_match_concatenated_names():
-    """'plant' must reach 'plantclef2024' — whole-token matching missed the one
-    model that motivated this feature."""
-    assert hub._matched_terms("gerald29/plantclef2024", ("plant",)) == ("plant",)
-    assert hub._matched_terms(
-        "vincent-espitalier/dino-v2-reg4-with-plantclef2024-weights", ("plant",)) == ("plant",)
-
-
-def test_size_is_computed_from_parameters_not_trusted_from_the_hub():
-    c = hub.Candidate("x/y", params=86_000_000, downloads=10, likes=0,
-                      pipeline=None, library=None)
-    assert c.size_mb(4) == pytest.approx(43.0)
-    assert c.fits(50) is True and c.fits(20) is False
-
-
-def test_unpublished_size_is_neither_fits_nor_fails():
-    """A model whose size is unknown is not a model that fits."""
-    c = hub.Candidate("x/y", params=None, downloads=10, likes=0,
-                      pipeline=None, library=None)
-    assert c.fits(50) is None
-    assert c.fits(None) is True
-
-
-def test_domain_match_outranks_popularity_but_not_by_unlimited_margin():
-    obscure_hit = hub.Candidate("a/plant-x", 1, 19, 0, None, None, matched=("plant",))
-    popular_general = hub.Candidate("timm/mobilenetv3", 1, 17_700_000, 0, None, None)
-    obscure_general = hub.Candidate("b/whatever", 1, 5, 0, None, None)
-    rank = lambda c: -(2.0 + __import__("math").log10(c.downloads + 1) / 3.0
-                       if c.matched else __import__("math").log10(c.downloads + 1) / 3.0)
-    assert rank(obscure_hit) < rank(obscure_general)      # domain match wins on a tie
-    assert rank(popular_general) < rank(obscure_general)  # popularity still counts
-
-
-def test_render_states_these_are_candidates_not_recommendations():
-    c = hub.Candidate("a/plant-x", 10_000_000, 500, 0, None, None, matched=("plant",))
-    out = hub.render([c], [], [], budget_mb=50)
-    assert "Candidates, not recommendations" in out
-
-
-# ---- config validation -----------------------------------------------------
-
-from narrowcast import config as CFG, sweep as SW  # noqa: E402
-
 _MIN = {"data": {"images": "./x"}, "objective": {"metric": "label_share", "minimum": 0.9}}
 
 
-def test_config_parses_a_minimal_task():
-    c = CFG.parse(_MIN)
-    assert c.metric == "label_share" and c.minimum == 0.9
-    assert c.data == {"images": "./x"} and c.max_size_mb is None
-
-
-def test_config_rejects_an_unknown_metric():
-    bad = {**_MIN, "objective": {"metric": "f1_score", "minimum": 0.9}}
-    with pytest.raises(ValueError, match="unknown metric"):
-        CFG.parse(bad)
-
-
-def test_config_rejects_a_minimum_outside_zero_one():
-    bad = {**_MIN, "objective": {"metric": "coverage", "minimum": 90}}
-    with pytest.raises(ValueError, match="fraction in"):
-        CFG.parse(bad)
-
-
-def test_config_requires_exactly_one_data_source():
-    with pytest.raises(ValueError, match="exactly one"):
-        CFG.parse({**_MIN, "data": {"images": "a", "manifest": "b"}})
-    with pytest.raises(ValueError, match="exactly one"):
-        CFG.parse({**_MIN, "data": {}})
-
-
-def test_config_names_the_field_it_is_complaining_about():
-    """A typo that silently becomes a default is how a constraint gets believed."""
-    with pytest.raises(ValueError, match="`objective` needs a `minimum`"):
-        CFG.parse({**_MIN, "objective": {"metric": "coverage"}})
-
-
-# ---- sweep decision rules --------------------------------------------------
-
 def _r(name, size, val, metric="label_share"):
     return SW.Result(name, size, {metric: val, "coverage": 0.8, "precision": 0.9})
-
-
-def test_choose_takes_the_smallest_that_qualifies_not_the_best():
-    """Size is the declared constraint; accuracy above the floor is not worth bytes."""
-    rs = [_r("big", 152.0, 0.98), _r("small", 17.9, 0.91), _r("mid", 43.3, 0.96)]
-    assert SW.choose(rs, "label_share", 0.90).encoder == "small"
-
-
-def test_choose_returns_none_when_nothing_clears_the_floor():
-    rs = [_r("a", 10.0, 0.80), _r("b", 20.0, 0.85)]
-    assert SW.choose(rs, "label_share", 0.90) is None
-
-
-def test_shortfall_names_the_closest_candidate_and_the_gap():
-    rs = [_r("a", 10.0, 0.80), _r("b", 20.0, 0.87)]
-    best, gap = SW.shortfall(rs, "label_share", 0.90)
-    assert best.encoder == "b" and gap == pytest.approx(0.03)
-
-
-def test_a_failed_candidate_does_not_end_the_sweep_or_get_chosen():
-    rs = [SW.Result("broken", 5.0, None, "RuntimeError: boom"), _r("ok", 20.0, 0.95)]
-    assert SW.choose(rs, "label_share", 0.90).encoder == "ok"
-    assert "failed" in SW.render(rs, "label_share", 0.90)
-
-
-def test_render_shows_the_floor_and_marks_what_clears_it():
-    out = SW.render([_r("a", 20.0, 0.95), _r("b", 10.0, 0.80)], "label_share", 0.90)
-    assert "floor: label_share >= 0.9000" in out and "ok" in out
 
 
 # ---- the supplied group column must actually reach the cascade -------------
@@ -730,7 +497,7 @@ def test_absent_bucket_does_not_lower_the_stated_prevalence():
     assert m["p_ood"] == 0.2
 
 
-# ---- fit is offline: candidates never come from the network ---------------
+# ---- acquisition origin, clustering, and rows per label -------------------
 
 class _Cfg:
     """Minimal stand-in for a parsed config; `_candidates` reads only these."""
@@ -738,39 +505,6 @@ class _Cfg:
         self.encoders, self.domain = encoders, domain
         self.max_size_mb, self.max_candidates = max_size_mb, max_candidates
 
-
-def test_candidates_never_reach_the_hub(monkeypatch):
-    """A Hub search here could not contribute a usable candidate -- load_encoder
-    resolves variants against its own table and raises on a repo id, so every
-    discovered candidate failed inside sweep.evaluate and was swallowed. It also
-    made the candidate set depend on what the Hub returned that day."""
-    from narrowcast import cli, hub
-    monkeypatch.setattr(hub, "search", lambda *a, **k: pytest.fail("fit hit the network"))
-    got = cli._candidates(_Cfg(domain=("plant", "flora"), max_size_mb=50))
-    assert got and all(name in encoders.BY_VARIANT for name, _ in got)
-
-
-def test_candidates_honour_an_explicit_list():
-    from narrowcast import cli
-    got = cli._candidates(_Cfg(encoders=("plantclef24", "ast-audioset")))
-    assert [n for n, _ in got] == ["plantclef24", "ast-audioset"]
-    # an encoder outside the registry has no measured size, and none is invented
-    assert dict(got)["ast-audioset"] is None
-
-
-def test_candidates_respect_the_budget():
-    from narrowcast import cli
-    got = cli._candidates(_Cfg(max_size_mb=20))
-    assert "bioclip2" not in [n for n, _ in got]
-
-
-# --- origin composition ------------------------------------------------------
-#
-# The measurement exists because the size of this effect is domain-dependent and
-# cannot be inferred from the label set: ~0 on plants once K is small, 10-20
-# points on dermatology and keyword spotting at every K tried. So the tool
-# measures it rather than warning about it, and these tests pin the contract
-# rather than the number.
 
 def _origin_rows(labels, groups, origin, dim=8, seed=0, shift=0.0):
     """Like `_rows`, but rows from origin 'B' are displaced in feature space, so
@@ -1020,32 +754,6 @@ def test_render_reports_the_declines_not_just_the_answers(tmp_path):
     assert "named to a label" in text and "declined" in text
 
 
-def test_unlabelled_loader_takes_a_flat_folder(tmp_path):
-    """At predict time the labels are the question, so requiring `DIR/<label>/`
-    would make a user invent a subdirectory per photograph to classify a folder.
-    `from_images` is the training contract; this is the inference one."""
-    for n in ("b.jpg", "a.png", "notes.txt"):
-        (tmp_path / n).write_bytes(b"x")
-    rows = sources.from_unlabelled(tmp_path)
-    assert len(rows) == 2                          # the .txt is not an image
-    assert [Path(p).name for p in rows.path] == ["a.png", "b.jpg"]   # sorted
-    assert set(rows.label) == {sources.UNKNOWN}
-
-
-def test_unlabelled_loader_walks_subdirectories_without_reading_them_as_labels(tmp_path):
-    (tmp_path / "sub").mkdir()
-    (tmp_path / "top.jpg").write_bytes(b"x")
-    (tmp_path / "sub" / "deep.jpg").write_bytes(b"x")
-    rows = sources.from_unlabelled(tmp_path)
-    assert len(rows) == 2
-    assert set(rows.label) == {sources.UNKNOWN}    # "sub" is not a label
-
-
-def test_unlabelled_loader_names_what_it_looked_for_when_empty(tmp_path):
-    with pytest.raises(ValueError, match="no images under"):
-        sources.from_unlabelled(tmp_path)
-
-
 # ---- multi-modal honesty ---------------------------------------------------
 
 def _mf(labels_, groups_=None, encoder="mobileclip2_s2"):
@@ -1066,9 +774,12 @@ def _mf(labels_, groups_=None, encoder="mobileclip2_s2"):
 def test_card_states_no_size_for_an_encoder_it_never_ran():
     """`--embeddings` means the encoder ran elsewhere. Quoting the registry's
     bytes would put a fabricated number on the artifact whose job is being
-    checkable — a wav2vec2 audio model was carded as `mobileclip2_s0`, 5.7 MB."""
+    checkable — a wav2vec2 audio model was carded as `mobileclip2_s0`, 5.7 MB.
+
+    Every build is now this case: the encoder registry is gone and nothing here
+    loads a model, so the card can never state a size."""
     out = card.render(_mf(["yes", "no"], encoder="wav2vec2-base"))
-    assert "precomputed elsewhere" in out
+    assert "size not stated" in out and "scored outside this tool" in out
     assert "5.7 MB" not in out and "MB int4" not in out
 
 
@@ -1130,3 +841,147 @@ def test_crowded_example_names_a_real_group_or_rephrases():
     assert '"it is a comp"' in named
     bare = card.render(_mf(["alpha", "beta"]))
     assert "it is a group" not in bare
+
+
+# ---- the audit path: posteriors from a model this tool did not fit ----------
+
+def _scores_npz(tmp_path, n_per=8, ood=0):
+    """Two groups of two labels each, plus optional out-of-list rows.
+
+    One out-of-list label shares a group with the list (`near_ood`), the other
+    does not (`distant_ood`), so the bucketing rule has both cases to get right.
+    """
+    classes = np.array(["Alpha one", "Alpha two", "Beta one", "Beta two"])
+    lab, grp, clu, rows = [], [], [], []
+    for c in classes:
+        for k in range(n_per):
+            p = np.full(len(classes), 0.05)
+            p[list(classes).index(c)] = 0.85
+            rows.append(p); lab.append(c); grp.append(c.split()[0])
+            clu.append(f"{c}-{k // 2}")
+    for k in range(ood):
+        near = k % 2 == 0
+        rows.append(np.full(len(classes), 0.25))
+        lab.append("Alpha absent" if near else "Zeta absent")
+        grp.append("Alpha" if near else "Zeta")
+        clu.append(f"ood{k // 2}")
+    f = tmp_path / "s.npz"
+    np.savez(f, proba=np.vstack(rows), classes=classes, label=np.array(lab),
+             group=np.array(grp), cluster=np.array(clu))
+    return f, classes
+
+
+def test_scores_path_buckets_out_of_list_rows_by_group(tmp_path):
+    """A row whose truth is not among `classes` is out-of-list by construction.
+    Whether it is a *relative* follows from its group, and the two are weighted
+    differently by `deployment_weights` -- so getting this wrong moves the
+    operating point, not just a label."""
+    f, _ = _scores_npz(tmp_path, ood=8)
+    ds = build.load_scored(sources.from_scores(f))
+    assert ds.counts["in_catalog"] == 32
+    assert ds.counts["near_ood"] == 4 and ds.counts["distant_ood"] == 4
+    assert set(ds.truth[ds.bucket != "in_catalog"]) == {build.OTHER}
+
+
+def test_scores_path_keeps_the_real_label_as_the_clustering_identity(tmp_path):
+    """Out-of-list rows score as __OTHER__ but must not *cluster* as it. Giving
+    them one identity leaves `make_splits` a single cluster for the whole bucket
+    and fits thresholds on a calibration set with no negatives in it -- the
+    mistake that silently broke a published table."""
+    f, _ = _scores_npz(tmp_path, ood=8)
+    ds = build.load_scored(sources.from_scores(f))
+    ood = ds.cluster[ds.bucket != "in_catalog"]
+    assert build.OTHER not in set(ood)
+    assert len(set(ood)) > 1
+
+
+def test_audited_and_fitted_models_go_through_the_same_measurement(tmp_path):
+    """`frame_from_posteriors` is the one path. If `score_frame` ever stops
+    delegating to it, a model we fitted and a model we audited would be measured
+    by two different code paths and could drift apart silently."""
+    f, classes = _scores_npz(tmp_path, ood=8)
+    rows = sources.from_scores(f)
+    ds = build.load_scored(rows)
+    frame = build.frame_from_posteriors(rows.proba, rows.classes, ds)
+    assert set(frame.columns) >= {"label_conf", "group_conf", "label_ok",
+                                  "group_ok", "in_catalog", "bucket"}
+    # in-list rows put 0.85 on the truth and share a group with one other label
+    inl = frame[frame["in_catalog"]]
+    assert inl["label_ok"].all() and inl["group_ok"].all()
+    assert inl["label_conf"].max() == pytest.approx(0.85)
+    assert inl["group_conf"].max() == pytest.approx(0.90)   # 0.85 + its sibling
+
+
+def test_scores_need_not_sum_to_one(tmp_path):
+    """A model that abstains by leaving mass unassigned is still auditable: the
+    cascade compares the largest label mass and largest group mass against two
+    thresholds, and both survive a positive rescale."""
+    f, classes = _scores_npz(tmp_path, ood=4)
+    z = dict(np.load(f, allow_pickle=True))
+    z["proba"] = z["proba"] * 0.5
+    g = tmp_path / "half.npz"
+    np.savez(g, **z)
+    rows = sources.from_scores(g)
+    ds = build.load_scored(rows)
+    frame = build.frame_from_posteriors(rows.proba, rows.classes, ds)
+    assert frame[frame["in_catalog"]]["label_ok"].all()
+
+
+def test_scores_reject_a_shape_that_cannot_line_up(tmp_path):
+    f = tmp_path / "bad.npz"
+    np.savez(f, proba=np.zeros((3, 4)), classes=np.array(["a", "b"]),
+             label=np.array(["a", "a", "b"]))
+    with pytest.raises(ValueError, match="columns"):
+        sources.from_scores(f)
+
+
+def test_scores_reject_negative_mass(tmp_path):
+    f = tmp_path / "neg.npz"
+    np.savez(f, proba=np.array([[-0.1, 1.1]]), classes=np.array(["a", "b"]),
+             label=np.array(["a"]))
+    with pytest.raises(ValueError, match="negative"):
+        sources.from_scores(f)
+
+
+def test_an_audit_with_no_out_of_list_rows_says_so(tmp_path):
+    """Coverage is only a measurement of rejection if there is something to
+    reject. Without out-of-list rows it is a different number wearing the same
+    name, and the card has to be able to say which."""
+    f, _ = _scores_npz(tmp_path, ood=0)
+    ds = build.load_scored(sources.from_scores(f))
+    assert ds.counts["near_ood"] == 0 and ds.counts["distant_ood"] == 0
+    assert any("no out-of-list rows" in n for n in ds.counts["notes"])
+
+
+def test_audited_bundle_carries_no_head_and_predict_refuses_it(tmp_path):
+    """We measured someone else's model; we did not obtain a copy of it."""
+    from narrowcast import predict as PRED
+    f, _ = _scores_npz(tmp_path, ood=8)
+    rows = sources.from_scores(f)
+    ds = build.load_scored(rows)
+    frame = build.frame_from_posteriors(rows.proba, rows.classes, ds)
+    metrics = build.fit_and_measure(frame, p_ood=0.2)
+    out = build.save_bundle(tmp_path / "b", None, sorted(rows.classes.tolist()),
+                            "unstated", metrics, labels.analyse(sorted(rows.classes.tolist())),
+                            ds.counts, source=str(f))
+    assert not (out / "head.npz").exists()
+    assert json.loads((out / "manifest.json").read_text())["has_head"] is False
+    with pytest.raises(ValueError, match="did not fit"):
+        PRED.Bundle(out)
+
+
+def test_the_card_does_not_invent_a_training_set_it_was_never_shown(tmp_path):
+    """`rows_per_label` is None on an audit. The thin-data warning has no
+    denominator, and saying nothing is correct -- counting the evaluation rows
+    would describe the wrong set."""
+    f, _ = _scores_npz(tmp_path, ood=8)
+    rows = sources.from_scores(f)
+    ds = build.load_scored(rows)
+    frame = build.frame_from_posteriors(rows.proba, rows.classes, ds)
+    metrics = build.fit_and_measure(frame, p_ood=0.2)
+    chosen = sorted(rows.classes.tolist())
+    out = build.save_bundle(tmp_path / "b", None, chosen, "unstated", metrics,
+                            labels.analyse(chosen), ds.counts, source=str(f))
+    text = card.render(json.loads((out / "manifest.json").read_text()))
+    assert "Training rows not known to this tool" in text
+    assert "size not stated" in text

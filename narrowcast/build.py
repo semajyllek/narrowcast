@@ -71,21 +71,24 @@ def _l2(X):
 
 
 def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dataset:
-    """Assemble a Dataset from a caller-supplied source (`tool/sources.py`).
+    """Assemble a Dataset from a caller-supplied source (`narrowcast/sources.py`).
 
-    The tool does not fetch. It is handed images, a manifest or precomputed
-    vectors, and the domain that produced them keeps ownership of how.
+    The tool does not fetch, and no longer encodes. It is handed vectors that
+    some encoder already produced, and the domain that produced them keeps
+    ownership of which encoder and how. `encoder_variant` is therefore a label
+    the caller declares for the record, never something resolved against a
+    registry -- the card prints it back and states no size for it.
 
     `background` is an optional second source of negatives. Without it there is
     no reject class: the model is closed-set, cannot decline, and the card says
     so rather than implying a rejection capability that was never fitted.
     """
     def _vecs(r):
-        if r.descriptor is not None:
-            return _l2(np.asarray(r.descriptor, dtype="float32"))
-        from narrowcast.encode import embed_images, load_encoder
-        model, preprocess, device = load_encoder(encoder_variant)
-        return _l2(embed_images(list(r.path), model, preprocess, device))
+        if r.descriptor is None:
+            raise ValueError("no 'descriptor' array: this path needs vectors. "
+                             "Supply --embeddings, or --scores if what you have "
+                             "is posteriors from a model you already fitted.")
+        return _l2(np.asarray(r.descriptor, dtype="float32"))
 
     X = _vecs(rows)
     rng = np.random.default_rng(seed)
@@ -148,6 +151,62 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
                    np.concatenate(cluster), np.concatenate(group),
                    np.concatenate(o_tr) if has_origin else None,
                    np.concatenate(o_ev) if has_origin else None)
+
+
+def load_scored(rows, seed: int = 0) -> Dataset:
+    """Assemble a Dataset from posteriors a caller already has (`--scores`).
+
+    No head is fitted and no vectors exist, so every row is an evaluation row and
+    the train side is empty. What this path *can* do that `--embeddings` cannot is
+    bucket the out-of-list rows properly: a row whose truth is not among `classes`
+    is out-of-list by construction, and whether it is `near_ood` or `distant_ood`
+    follows from whether its group is one the label set already contains. That
+    distinction matters -- `deployment_weights` mixes the two at declared shares,
+    and near-OOD is reliably the weakest bucket because a relative of a listed
+    label is exactly what a closed-set score cannot say "none of these" about.
+
+    Out-of-list rows carry `OTHER` as truth, so they can never score a correct
+    label or group, and keep their *real* label as the clustering identity. That
+    second half is not cosmetic: giving them `OTHER` as a cluster leaves
+    `make_splits` one cluster for the whole bucket, puts every negative on one
+    side of the split, and fits thresholds on a calibration set with no negatives
+    in it. That mistake silently broke a published table once already.
+    """
+    label = np.asarray(rows.label, dtype=str)
+    classes = np.asarray(rows.classes, dtype=str)
+    in_list = np.isin(label, classes)
+
+    group = np.asarray(rows.group, dtype=str)
+    listed_groups = set(group[in_list].tolist())
+    bucket = np.where(
+        in_list, "in_catalog",
+        np.where(np.isin(group, sorted(listed_groups)), "near_ood", "distant_ood"))
+
+    truth = np.where(in_list, label, OTHER)
+    counts = {b: int((bucket == b).sum())
+              for b in ("in_catalog", "near_ood", "distant_ood")}
+    counts["train"] = 0
+    # The caller's model was trained on something we were not shown, so the
+    # rows-per-label warning has no denominator here. Saying nothing is correct;
+    # inventing one from the evaluation rows would describe the wrong set.
+    counts["rows_per_label"] = None
+
+    notes = list(rows.notes)
+    if counts["near_ood"] + counts["distant_ood"] == 0:
+        notes.append("every row's label is among `classes`: no out-of-list rows, "
+                     "so the decline threshold has nothing to reject and coverage "
+                     "is not a measurement of rejection")
+    else:
+        notes.append(f"out-of-list rows bucketed by group: {counts['near_ood']} "
+                     f"near_ood, {counts['distant_ood']} distant_ood")
+    counts["notes"] = notes
+    counts["has_clusters"] = bool(rows.has_clusters)
+
+    empty = np.zeros((0, 1), dtype="float32")
+    return Dataset(empty, np.asarray([], dtype=str), pd.DataFrame(),
+                   empty, truth, bucket, counts,
+                   np.asarray(rows.cluster, dtype=str), group,
+                   None, None if rows.origin is None else np.asarray(rows.origin, dtype=str))
 
 
 def fit_head(ds: Dataset, C: float = 10.0) -> LogisticRegression:
@@ -242,14 +301,30 @@ def origin_cost(ds: Dataset, deployment: str, C: float = 10.0) -> dict | None:
 
 
 def score_frame(clf, ds: Dataset) -> pd.DataFrame:
-    """Per-observation cascade inputs and outcomes."""
-    classes = np.array(clf.classes_)
+    """Per-observation cascade inputs and outcomes, from a head we fitted."""
+    return frame_from_posteriors(clf.predict_proba(ds.X_eval),
+                                 np.array(clf.classes_), ds)
+
+
+def frame_from_posteriors(proba, classes, ds: Dataset) -> pd.DataFrame:
+    """Per-observation cascade inputs and outcomes, from posteriors of any origin.
+
+    Split out of `score_frame` so that a model we did not fit is measured by
+    exactly the same code as one we did. Everything downstream -- threshold
+    fitting, the three-way split, headroom, the intervals -- reads this frame and
+    nothing else, so the audit path cannot drift from the build path by accident.
+
+    `proba` is rows x len(classes) and need not sum to 1; `decide` compares the
+    largest label mass and the largest group mass against two thresholds, and
+    both are order-preserving under any positive rescale of a row.
+    """
+    proba, classes = np.asarray(proba, float), np.asarray(classes)
     mask = classes != OTHER
     gmap = (dict(zip(ds.truth.tolist(), ds.group.tolist()))
             if ds.group is not None else None)
     gmat, ug = group_matrix(classes, mask, gmap)
 
-    cata = clf.predict_proba(ds.X_eval)[:, mask]
+    cata = proba[:, mask]
     gscore = cata @ gmat.T
     sp_pred = classes[mask][cata.argmax(1)]
     gp_pred = ug[gscore.argmax(1)]
@@ -484,10 +559,18 @@ def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
     """
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out / "head.npz", coef=clf.coef_, intercept=clf.intercept_,
-                        classes=np.asarray(clf.classes_, dtype=str))
+    # `clf` is None when the posteriors came from a model that is not ours
+    # (`--scores`). There is then no head to write, and `predict` cannot run the
+    # bundle -- which is honest: we measured someone else's model, we did not
+    # obtain a copy of it. The manifest records the absence so `predict` can say
+    # so rather than failing on a missing file.
+    if clf is not None:
+        np.savez_compressed(out / "head.npz", coef=clf.coef_,
+                            intercept=clf.intercept_,
+                            classes=np.asarray(clf.classes_, dtype=str))
     manifest = {
         "bundle_version": BUNDLE_VERSION,
+        "has_head": clf is not None,
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "encoder": encoder,
         "labels": chosen,

@@ -1,17 +1,28 @@
 # narrowcast
 
-**A small classifier over a narrow label set, and the truth about how it will fail.**
+**Audit a classifier over a narrow label set: what it names, what it retreats to,
+and what it declines.**
 
 ```bash
-narrowcast plan    --species my.txt --budget 20
-narrowcast build   --images ./photos --background-images ./other --out models/mine
-narrowcast card    models/mine
-narrowcast predict models/mine --images ./new-photos
+narrowcast audit --scores     scores.npz --out models/mine   # a model you already have
+narrowcast audit --embeddings vecs.npz   --out models/mine   # vectors, head fitted here
+narrowcast card  models/mine
 ```
 
 Training a classifier on your own classes is commodity — a dozen tools do it.
-None of them tell you *what you are about to get*, and for narrow label sets the
+None of them tell you *what you actually got*, and for narrow label sets the
 metrics everyone publishes are actively misleading.
+
+narrowcast does not choose an encoder, fetch a dataset, or read a pixel. You
+bring the model; it tells you how the model will fail.
+
+> **This used to be a builder.** It searched encoders under a size budget,
+> projected outcomes from a shipped grid, and discovered candidates on the Hub.
+> That part did not work — the configuration space is enormous and almost
+> entirely data-dependent — and it is gone as of 0.2.0. The measurement is what
+> held up. See [`docs/deep_dive.html`](docs/deep_dive.html), and `DISPOSITION.md`
+> in [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid) for
+> the reasoning.
 
 ## The finding this exists for
 
@@ -29,8 +40,9 @@ worse.** It buys the coverage with group answers that narrow nothing — "it is 
 *Sedum*" when eight of your fourteen classes are *Sedum*.
 
 Report coverage and precision alone and a user reads their worst case as their
-best. So `plan` runs before any compute, and no report prints coverage without
-the label-level share beside it.
+best. So no report here prints coverage without the label-level share beside it,
+and the card gates on **measured** retreat rather than asserting where the
+answers went.
 
 Reproduced outside biology: on birds, a *Larus*/*Calidris* set scored **higher**
 coverage than 13 distinct genera while label-level fell 0.958 → 0.718. The trap
@@ -41,17 +53,33 @@ that decides whether it fires at all — is in
 **[docs/deep_dive.html](docs/deep_dive.html)**, an 18-section technical reference
 with every number traced to a findings doc.
 
-## It takes a dataset; it does not fetch one
+## Two ways in, both self-contained
 
-| flag | shape |
-|---|---|
-| `--images DIR` | `DIR/<label>/*.jpg` |
-| `--manifest FILE` | parquet/csv: `label`, `path` [, `group`, `cluster`, `origin`] |
-| `--embeddings FILE` | npz: `descriptor`, `label` [, `group`, `cluster`, `origin`] |
+| flag | shape | what gets fitted |
+|---|---|---|
+| `--scores FILE` | npz: `proba`, `classes`, `label` [, `group`, `cluster`, `origin`] | the two thresholds |
+| `--embeddings FILE` | npz: `descriptor`, `label` [, `group`, `cluster`, `origin`] | a logistic head, then the thresholds |
 
-`--background-*` takes the same three forms and supplies negatives. Without it
-there is no reject class: the model is closed-set, cannot decline, and the card
-says so rather than implying a capability that was never fitted.
+**`--scores` is the audit path.** `proba` is one row per observation and one
+column per entry of `classes`, from whatever produced it — a logistic head, a
+fine-tuned network, an ensemble, a vendor API. Rows need not sum to 1: a model
+that abstains by leaving mass unassigned is still auditable, because the cascade
+compares the largest label mass against the largest group mass and both survive a
+positive rescale.
+
+Any row whose `label` is not among `classes` is **out-of-list** by construction,
+and is bucketed by its group: a relative of something on your list (`near_ood`,
+reliably the weakest bucket) or unrelated (`distant_ood`). So the audit path needs
+no separate negatives file.
+
+**`--embeddings` still fits a head**, and takes `--background-embeddings` for
+negatives. Without them there is no reject class: the model is closed-set, cannot
+decline, and the card says so rather than implying a capability that was never
+fitted.
+
+Both paths converge on one function — `build.frame_from_posteriors` — so a model
+narrowcast fitted and a model it merely audited are measured by identical code
+and cannot drift apart.
 
 **`cluster`** is the unit that must not straddle a train/test split — several
 photographs of one subject, one specimen, one production run. Without it every
@@ -67,9 +95,9 @@ nothing unless you supply it. Supply it when your rows come from more than one,
 because the labels that have training rows from the origin you will actually
 deploy against and the labels that do not **are not comparable**, and the ones
 that do not are measurably worse off than if none had them. Pass
-`--deployment-origin NAME` to `build` and the card measures it:
+`--deployment-origin NAME` and the card measures it (`--embeddings` only — it
+refits a head twice, and with `--scores` there is no head to refit):
 
-```
 ## Origin composition — deployment origin `clinic_dark`
 
 **3 of 28 labels have no training data from `clinic_dark`**, the origin this
@@ -94,162 +122,29 @@ measurable.
 Where the data came from — which corpus, under what licence, reconciled against
 whose taxonomy — is a domain decision, so it lives in your project, not here.
 
-## Constraint-driven: `fit`
+## Three commands
 
-Declare what you need and let it search:
-
-```yaml
-task: oregon-plants
-data:        { manifest: ./data.parquet, background: { manifest: ./neg.parquet } }
-objective:   { metric: label_share, minimum: 0.90 }
-constraints: { max_size_mb: 50, encoders: [plantclef24, mobileclip2_s2] }
-```
-
-```bash
-narrowcast fit --config task.yaml --out models/mine
-```
-
-Candidates are the encoders you name in `constraints.encoders`, or the built-in
-registry filtered to your budget if you name none. **`fit` makes no network
-calls and its candidate set does not change between runs.** Each runs through the
-same path a single `build` uses, so the frontier and the card cannot disagree:
-
-```
-  encoder                       int4    label_share
-  plantclef24                  43.3M         0.9246  ok    cov 0.790 prec 0.994
-  mobileclip2_s2               17.9M         0.7166        cov 0.612 prec 0.973
-
-  floor: label_share >= 0.9000, budget 50 MB
-  selected plantclef24 — smallest that clears the floor
-```
-
-It picks the **smallest that clears the floor**, not the best: size is the
-constraint you declared, and accuracy above your floor is not worth paying bytes
-for.
-
-**When nothing clears it, `fit` refuses** — prints the frontier, names the
-closest candidate and the gap, writes no bundle, and exits non-zero so CI can
-gate on it:
-
-```
-  REFUSED: nothing reached label_share >= 0.99.
-  Closest was plantclef24 at 0.9379, short by 0.0521.
-  No bundle written. Lower the floor, raise the size budget, or supply better data.
-```
-
-That refusal is the point. `minimum` is only a meaningful contract because the
-card's numbers are trustworthy.
-
-> `data.embeddings` pins the encoder that produced them, so `fit` refuses to
-> sweep several candidates over one embeddings file — it would score identical
-> numbers N times and present them as a comparison. Sweeping needs `images` or
-> `manifest`.
-
-## Choosing an encoder
-
-**You choose it; the tool does not go looking.** Name one or more in
-`constraints.encoders`, or omit the key and `fit` sweeps the built-in registry
-within your budget. The registry is image-only, so any other modality must name
-its encoder.
-
-### Known-good encoders by domain
-
-Sizes are int4 and were **counted from the loaded image tower**, not quoted from
-a paper. Entries marked *precomputed* are used through `--embeddings`: narrowcast
-never loads them, so the name is a label and the size is the upstream model's.
-
-| domain | encoder | int4 | why |
-|---|---|---|---|
-| natural imagery, general | `mobileclip2_s0` | 5.7 MB | smallest that works at all |
-| natural imagery, general | `mobileclip2_s2` | 17.9 MB | the small-budget default |
-| **plants, fungi, animals** | `bioclip2` | 152 MB | strongest measured here; ties a server model at species rank |
-| **plants specifically** | `plantclef24` | 43.3 MB | 1.5pp behind BioCLIP-2, *ahead* on hazard safety; 518px, so slower than its bytes suggest |
-| audio, environmental | `ast-audioset` *(precomputed)* | — | general AudioSet model, not tuned per task |
-| speech / keywords | `wav2vec2-base` *(precomputed)* | — | general speech model; groups by phonetics, not meaning |
-| text | `all-MiniLM-L6-v2` *(precomputed)* | — | 22.7M sentence encoder |
-
-**Precomputed means the tool never ran it.** With `--embeddings` the vectors fix
-the encoder and narrowcast has no way to verify which one produced them, so
-`--encoder` is ignored and the card states no size. Pass `--encoder-name` to
-record it for provenance — declared, not verified:
-
-```bash
-narrowcast build --embeddings kws.npz --background-embeddings bg.npz \
-    --encoder-name wav2vec2-base --out models/keywords
-```
-
-```
-Built … · encoder `wav2vec2-base` (size not stated — vectors were precomputed elsewhere)
-```
-
-**Supply a `group` column for any non-binomial domain.** The default coarse rank
-is the label's first whitespace token, which for single-word labels like keywords
-makes every label its own group — the cascade loses its third answer and the card
-now says so. On six Speech Commands keywords, adding acoustic groups took coverage
-from **52.0% to 62.0%** at comparable precision.
-
-Byte order is not speed order: `plantclef24` is a third of BioCLIP-2's parameters
-and roughly twice its latency, because it runs at 5.3× the pixels. Storage and
-compute are separate budgets and the registry ranks only one.
-
-### Refreshing this list (maintenance)
-
-```bash
-narrowcast encoders --domain plant --domain flora --budget 50
-```
-
-Queries the Hugging Face Hub and verifies each candidate's size **client-side**
-from `safetensors.total`. The Hub's own `num_parameters` filter cannot be trusted
-— asking for `<100M` returns 303M models, because repos without an indexed count
-pass through silently. Candidates whose size is not published are listed
-separately rather than assumed small.
-
-**This is a maintenance command, not a build step.** Nothing it prints can be fed
-straight to `fit`: `encode.load_encoder` resolves variants against its own table,
-so adopting a model means adding it there (how to load it) and to
-`encoders.ENCODERS` (its measured size), then naming it in your config. `fit`
-itself never touches the network — a candidate set that depends on what the Hub
-returned today is not one you can reproduce tomorrow.
-
-For many domains someone has already fine-tuned an encoder, and using theirs
-beats compressing a general one. That is not speculation: the strongest
-size/accuracy point in the parent project came from an off-the-shelf
-domain-fine-tuned ViT-B that matched a model 3.5× its size and beat it on hazard
-safety — found by accident.
-
-**These are candidates, not recommendations.** Ranking is a name match plus
-popularity, which is a weak proxy for fitness: a plant query returns mostly
-*disease* classifiers when you asked about species. The search narrows the field;
-`build` and `card` decide. That division is deliberate — the search does not need
-to be clever when evaluating a candidate honestly is cheap.
-
-## Four commands
-
-**`plan`** — seconds, no training, no downloads. Finds crowded groups and names
-the siblings you left *outside* the set (the weakest rejection case, since no
-correct answer exists for them), sizes an encoder to your byte budget, and
-projects — *only if a measured profile exists for your domain*.
-
-**`build`** — fits a logistic head over frozen embeddings, fits label/group/decline
-thresholds by expected-utility maximisation on a clustered calibration split,
-evaluates against held-out data, and writes a bundle plus a card.
+**`audit`** — fits label/group/decline thresholds by expected-utility
+maximisation on a clustered calibration split, evaluates against the held-out
+half, and writes a bundle plus a card. With `--embeddings` it fits a logistic head
+first; with `--scores` your model *is* the head.
 
 **`card`** — the report. Coverage, precision, label-level share, per-bucket
-behaviour, cluster-bootstrapped intervals, and a **gate** on labels you declared
-consequential.
+behaviour, cluster-bootstrapped intervals, measured headroom and the full
+label/group/decline split, and a **gate** on labels you declared consequential.
 
-**`predict`** — run the model, answering the way the card says it answers. Takes a
-plain folder of images: `build` wants `DIR/<label>/`, but at predict time the
-labels are what you are asking for.
+**`predict`** — run a bundle *this tool fitted*, answering the way the card says
+it answers. Takes `--embeddings` from the same encoder the bundle names; there is
+no encoder here, so there is no way to hand it photographs.
 
 ```bash
-narrowcast predict models/mine --images ./new-photos
+narrowcast predict models/mine --embeddings ./new-vectors.npz
 ```
 
 ```
-IMG_4417.jpg    Sedum acre              0.969
-IMG_4418.jpg    Sedum (group only)      0.941
-IMG_4419.jpg    declined                0.612
+row 0    Sedum acre              0.969
+row 1    Sedum (group only)      0.941
+row 2    declined                0.612
 
 972 rows — 316 named to a label (32.5%), 587 answered at group only, 69 declined
 ```
@@ -265,10 +160,13 @@ thresholds exactly as fitted, so **a prediction and the card cannot disagree** �
 pinned by a test that checks both against the same arithmetic the measurement
 used.
 
+A bundle from `--scores` carries measurements but **no weights**, and `predict`
+refuses it by name. We measured your model; we did not obtain a copy of it.
+
 ## Consequential labels
 
 ```bash
-narrowcast build --images ./photos --hazard "Conium maculatum" --out models/mine
+narrowcast audit --scores ./scores.npz --hazard "Conium maculatum" --out models/mine
 ```
 
 For labels where being mistaken for a harmless one is the costly error, the card
@@ -283,21 +181,15 @@ fails.
 Group answers count: naming a group that contains nothing consequential is as
 actionable as a wrong label.
 
-## Projection is gated
-
-`profiles/plants-bioclip2.json` is a grid measured on 530 plant species through
-BioCLIP-2. **There is no fallback.** Ask for a domain without a profile and
-projection raises rather than quoting plant numbers at you.
-
-The bird replication licenses `plan`'s *structural* warnings in any domain with a
-label/group hierarchy. It does not license the numbers.
-
 ## Install
 
 ```bash
-pip install -e .            # plan, card, and --embeddings workflows
-pip install -e '.[encode]'  # adds torch/open_clip to turn images into vectors
+pip install -e .
 ```
+
+numpy, pandas and scikit-learn. **There is no `[encode]` extra** and torch is not
+a dependency at any level — narrowcast never turns images into vectors, so
+whatever produced your vectors or scores keeps ownership of that.
 
 ## Provenance
 
