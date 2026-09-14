@@ -218,7 +218,23 @@ figures they invalidated struck through rather than deleted.</p>
 
 <p>What the package does <em>not</em> supply is a dataset. Corpus choice, licensing and
 label reconciliation are domain decisions and remain with the caller; the interface is a
-directory of images, a manifest, or precomputed vectors.</p>
+file of precomputed vectors, or of per-observation posteriors from a model the caller
+already has.</p>
+
+<div class="note retract">
+<span class="key">Narrowed since these measurements were taken</span>
+<p><del>The interface is a directory of images, a manifest, or precomputed vectors.</del>
+The package also used to choose an encoder under a size budget, project outcomes from a
+shipped grid, and search for candidate encoders. As of v0.2.0 none of that exists: it
+takes vectors or posteriors and <strong>measures</strong>, and the six rows above are the
+whole of what it supplies.</p>
+<p>This does not touch a number in this document. The encoder comparisons of §13 and the
+three levers of §17 are <em>findings</em> about what opens the gap between task and model,
+established with encoders run outside the tool and reproducible from the vectors they
+produced. What changed is that the tool no longer pretends to make that choice for you —
+the configuration space is enormous and almost entirely data-dependent, which is itself
+the most practical thing this project learned.</p>
+</div>
 </section>
 
 <div class="note">
@@ -231,7 +247,8 @@ MobileCLIP2 and PlantCLEF2024 are used frozen, never fine-tuned, and are documen
 only by their input/output contract — an image in, an L2-normalised vector out.
 Distillation into a smaller encoder was attempted and failed; see §13.</p>
 <p><strong>Code:</strong> <a href="https://github.com/semajyllek/narrowcast">narrowcast</a>
-(the tool), <a href="https://github.com/semajyllek/narrowcast-plantid">plantid</a> (the research
+(the tool — <code>audit</code>, <code>card</code>, <code>predict</code>),
+<a href="https://github.com/semajyllek/narrowcast-plantid">plantid</a> (the research
 record), and the demo repos that consume the installed package —
 <a href="https://github.com/semajyllek/narrowcast-kws">narrowcast-kws</a> (audio) and
 <a href="https://github.com/semajyllek/narrowcast-derm">narrowcast-derm</a> (medical
