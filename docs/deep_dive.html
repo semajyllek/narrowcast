@@ -189,6 +189,8 @@ assumption is named.</strong></p>
   <div class="stat"><b>2.5%</b><span>worst single confusion declared in advance — the same model</span></div>
   <div class="stat b"><b>0.883</b><span>CV R² of <em>headroom</em> predicting the back-off, 1,409 arms</span></div>
   <div class="stat"><b>91×</b><span>how far that back-off moves at <em>fixed</em> headroom, changing only one declared assumption</span></div>
+  <div class="stat b"><b>0.6%</b><span>labels named from one example each, crowded set — at 96% reported precision (§17)</span></div>
+  <div class="stat"><b>3</b><span>independent levers that open headroom: data, parameters, pixels (§17)</span></div>
 </div>
 
 <section id="why" style="margin-top:44px">
@@ -253,7 +255,10 @@ imaging). Every formula below is transcribed from those sources.</p>
 <li><a href="#s12">Safety: per-pair vs. union</a></li>
 <li><a href="#s13">The size/accuracy frontier</a></li>
 <li><a href="#s14">Measuring contamination</a></li>
-<li><a href="#s15">Failure modes and open questions</a></li>
+<li><a href="#s15">Source shift: the missing control</a></li>
+<li><a href="#s16">Training-source composition</a></li>
+<li><a href="#s17">Starving the fine rank: three levers</a></li>
+<li><a href="#s18">Failure modes and open questions</a></li>
 </ol>
 </div>
 
@@ -832,6 +837,20 @@ corpora, headroom predicts group-answer share at cross-validated
 <span class="num">R² = 0.883</span>, against <span class="num">0.362</span> for fine
 accuracy alone. It began as a hypothesis at n = 4 and survived the scale-up.</p>
 
+<div class="note warn">
+<span class="key">Headroom is not a property of the label set</span>
+<p>Everything in this section varies the <em>label set</em> and holds the model fixed, which
+made it natural to read headroom as something a catalogue has. <strong>§17 shows that is the
+special case.</strong> Headroom measures the gap between what the task demands and what the
+model can deliver, and the label set is only one of three things that opens it: training-set
+size, parameter count and input resolution each move headroom on a <em>fixed</em> label set,
+by 0.2–0.5 in the arms measured there.</p>
+<p>The rule below is unaffected — it relates headroom to retreat, whatever set headroom. What
+changes is the inference people will want to draw from it: a low-headroom reading is a
+statement about one model on one label set with one training budget, not a property of the
+list that survives a smaller model or less data.</p>
+</div>
+
 <div class="scroll"><table>
 <thead><tr><th>crowded arm</th><th class="n">fine</th><th class="n">coarse</th><th class="n">headroom</th><th class="n">Δ coverage</th><th class="n">Δ label share</th></tr></thead>
 <tbody>
@@ -1148,6 +1167,9 @@ on <em>real iNaturalist field photographs</em>: BioCLIP-2 0.9790 → <b class="g
 <p>The frontier is an upper bound <em>for the small encoders specifically</em>. It is not
 wrong — it is measured on the data it names — but it does not survive a change of image
 source, and a user's photographs resemble field photographs.</p>
+<p><strong>This comparison is confounded</strong> — the label set varies between the two
+arms — and §15 repeats it with label set and head held fixed. The effect survives and
+grows: −17.9pp for S2, against −0.1pp for BioCLIP-2.</p>
 </div>
 
 <h3>Encoders, and why byte order is not speed order</h3>
@@ -1166,8 +1188,46 @@ latency, because it runs at 518px — 5.3× the pixels. So a byte budget and a l
 budget rank these differently, and the tool's <code>choose()</code> ranks storage only
 and says so.</p>
 
-<div class="note">
-<span class="key">The middle ground is not a distilled model</span>
+<h3>How much of an encoder a narrow task uses</h3>
+
+<p>Training-free, on cached vectors: project the embedding to <em>d</em> dimensions with PCA
+fitted on training rows only, and quantise per-dimension with ranges taken from training rows
+only, so values outside them clip as they would at export. Both arms, 15 draws, reported
+separately.</p>
+
+<p>Only cells where <span class="num">d &lt; K</span> are informative. A K-way linear head's
+decision lives in the span of its K coefficient vectors — at most K directions, K−1 after the
+constant — so &ldquo;32 dimensions holds a 20-label task&rdquo; sits above a bound that holds by
+construction and is closer to arithmetic than to measurement.</p>
+
+<div class="scroll"><table>
+<thead><tr><th>encoder</th><th class="n">K=20, d=16</th><th class="n">K=50, d=32</th><th class="n">random proj., K=20, d=16</th></tr></thead>
+<tbody>
+<tr class="hi"><td>BioCLIP-2 · 152 MB</td><td class="n"><b class="g">−3.2pp</b></td><td class="n"><b class="g">−1.9pp</b></td><td class="n">−9.8pp</td></tr>
+<tr><td>PlantCLEF2024 · 43.3 MB</td><td class="n">−5.6pp</td><td class="n">−3.5pp</td><td class="n">−18.4pp</td></tr>
+<tr><td>MobileCLIP2-S2 · 17.9 MB</td><td class="n">−6.8pp</td><td class="n">−4.3pp</td><td class="n">−16.8pp</td></tr>
+<tr><td>MobileCLIP2-S0 · 5.7 MB</td><td class="n"><b class="w">−7.7pp</b></td><td class="n"><b class="w">−4.7pp</b></td><td class="n">−23.0pp</td></tr>
+</tbody></table></div>
+
+<p><strong>Compressibility runs opposite to size.</strong> The 152 MB model gives up least
+when squeezed into a subspace smaller than its own label count; the 5.7 MB model gives up
+most. A large encoder spends most of its representation on distinctions a narrow catalogue
+never asks about, so nearly all of it is discardable — while a natively small encoder has no
+spare capacity to shed. The random-projection control costs 4–13pp more than PCA in every one
+of the 48 informative cells, and the margin widens as <em>d</em> falls, so this is a real task
+subspace rather than a statement about head capacity.</p>
+
+<p>Quantising the embedding to <strong>int4 is free in all 32 cells</strong> — largest
+deviation 0.6pp, sign inconsistent — and composes with the projection: 32 dimensions at 4 bits
+is <strong>16 bytes</strong> against 3,072 for the raw float vector, costing 2.1pp of congener
+top-1 at K=10.</p>
+
+<p class="muted">This bounds what a student must <em>emit</em>. It says nothing about what a
+student can <em>compute</em> from pixels, and only the second is the hard problem — which is
+what §17 measures.</p>
+
+<div class="note retract">
+<span class="key">Reopened — see §17</span>
 <p>Distilling BioCLIP-2 into a ViT-B — exactly this size class — was run on an A100 over
 48k transfer images, reaching held-out cosine 0.956 to the teacher. It <em>lost</em>
 0.7pp of group accuracy against the off-the-shelf model it was meant to beat, recovering
@@ -1177,6 +1237,13 @@ different one does.</p>
 <strong>cosine similarity to a teacher does not predict downstream accuracy.</strong> It
 bounds how much <em>could</em> have changed and says nothing about whether what changed
 mattered.</p>
+<p><strong>Both closed attempts matched a general embedding, and both were judged at
+K=490</strong> — so both optimised the quantity the standing rule above calls the wrong one,
+at a scale this tool does not build. Distilling the <em>fitted task</em> instead — the
+teacher's K+1 posteriors over labels the user named — is a different objective and has been
+reopened on those grounds. It is measured in §17 and is currently <em>not demonstrated</em>
+rather than refuted: the students were handicapped by input resolution, and the lever is not
+exhausted.</p>
 </div>
 </section>
 
@@ -1216,12 +1283,581 @@ reversed the sign and shrank the effect to noise.</p>
 MobileCLIP2-S2 loses 2.3pp with a CI excluding zero — the largest drop, from the encoder
 <em>least</em> likely to have trained on iNaturalist. It is sensitivity to drift, and it
 is the same pattern as the image-source change in §13 where S2 lost 9.4pp and BioCLIP-2
-lost 0.2pp. Two independent measurements agree: <em>a small encoder's accuracy is not
-merely lower, it is less durable.</em></p>
+lost 0.2pp, and as the controlled replication of it in §15. Three independent measurements
+agree: <em>a small encoder's accuracy is not merely lower, it is less durable.</em></p>
 </section>
 
 <section id="s15">
-<div class="sh"><p class="eyebrow">15</p><h2>Failure modes and open questions</h2></div>
+<div class="sh"><p class="eyebrow">15</p><h2>Source shift: the missing control</h2></div>
+
+<p>§14 bounds memorisation. It says nothing about what happens when the photographs come
+from somewhere else — a different app, a different population of photographers, a
+different convention about how a subject should be framed. That was the last untested
+axis, and closing it turned on noticing what the evaluation had been doing all along.</p>
+
+<div class="note warn">
+<span class="key">The reframing</span>
+<p>The plant heads are fitted on <strong>Pl@ntNet-300K</strong> and scored on
+<strong>iNaturalist</strong>. The head has never seen an iNaturalist photograph.
+<em>Every published number was already the cross-source arm.</em></p>
+<p>What was missing was the <strong>within-source control</strong> — what the same head
+scores on held-out photographs from the corpus it trained on. Without it an accuracy
+figure has no baseline, and the cost of the source change is unknown in either
+direction.</p>
+</div>
+
+<p>The design is a symmetric 2 × 2: one flat multinomial head per source, closed-set,
+fitted at a matched budget of 10 photographs per label per source so that head capacity
+cannot confound the comparison. 359 labels present in both corpora, 4,934 Pl@ntNet and
+4,750 iNaturalist test photographs, photo-level top-1 macro-averaged over labels, paired
+cluster bootstrap. Pre-registered before any head was fitted.</p>
+
+<div class="scroll"><table>
+<thead><tr><th>encoder</th><th class="n">P→P</th><th class="n">P→i</th><th class="n">i→i</th><th class="n">i→P</th><th class="n">deployment shift</th><th class="n">reverse shift</th></tr></thead>
+<tbody>
+<tr class="hi"><td>BioCLIP-2</td><td class="n">0.7701</td><td class="n">0.7691</td><td class="n">0.8615</td><td class="n">0.7145</td><td class="n"><b class="g">−0.001</b></td><td class="n">−0.147</td></tr>
+<tr><td>BioCLIP-2 int4</td><td class="n">0.7622</td><td class="n">0.7599</td><td class="n">0.8571</td><td class="n">0.7119</td><td class="n"><b class="g">−0.002</b></td><td class="n">−0.145</td></tr>
+<tr><td>PlantCLEF2024 <span class="muted">(43 MB)</span></td><td class="n">0.7678</td><td class="n">0.6815</td><td class="n">0.8414</td><td class="n">0.6815</td><td class="n"><b class="w">−0.086</b></td><td class="n">−0.160</td></tr>
+<tr><td>BioCLIP v1</td><td class="n">0.7009</td><td class="n">0.6012</td><td class="n">0.7006</td><td class="n">0.6013</td><td class="n"><b class="w">−0.100</b></td><td class="n">−0.099</td></tr>
+<tr><td>BioCLIP v1 int4</td><td class="n">0.6836</td><td class="n">0.5839</td><td class="n">0.6837</td><td class="n">0.5813</td><td class="n"><b class="w">−0.100</b></td><td class="n">−0.102</td></tr>
+<tr><td>iNat-only ViT-B</td><td class="n">0.6841</td><td class="n">0.5787</td><td class="n">0.6552</td><td class="n">0.5685</td><td class="n"><b class="w">−0.106</b></td><td class="n">−0.086</td></tr>
+<tr><td>MobileCLIP2-S0</td><td class="n">0.5130</td><td class="n">0.3499</td><td class="n">0.4281</td><td class="n">0.3394</td><td class="n"><b class="w">−0.163</b></td><td class="n">−0.089</td></tr>
+<tr><td>MobileCLIP2-S2 <span class="muted">(17.9 MB)</span></td><td class="n">0.5827</td><td class="n">0.4045</td><td class="n">0.5069</td><td class="n">0.4123</td><td class="n"><b class="w">−0.179</b></td><td class="n">−0.095</td></tr>
+</tbody></table></div>
+
+<p><span class="num">P→i</span> is train on Pl@ntNet, test on iNaturalist — the direction
+that ships. <strong>BioCLIP-2 pays nothing for the source change</strong>, at full
+precision and at int4 alike; its interval is
+<span class="num">[−0.029, +0.027]</span>. Every smaller encoder pays, and the size of
+the payment tracks encoder capability rather than byte count.</p>
+
+<p>This was <em>predicted in the pre-registration</em> from the confounded version in
+§13, where the label set varied between arms (−0.2pp and −9.4pp). The ordering survives
+with label set and head held fixed, and the small-encoder penalty roughly doubles:
+<b class="w">−17.9pp</b> rather than −9.4pp.</p>
+
+<h3>The asymmetry, which was not predicted</h3>
+
+<p>The reverse direction was left open because both shapes were live. Three shapes
+appeared, and they sort by encoder:</p>
+
+<ul>
+<li><strong>BioCLIP-2 is asymmetric.</strong> iNaturalist is the <em>easier</em> corpus
+for it — 0.8615 within-source against 0.7701 — a Pl@ntNet head transfers to it for free,
+and an iNaturalist head does not transfer back (−0.147). Fitting on the easier corpus
+buys accuracy that does not survive contact with the other one.</li>
+<li><strong>BioCLIP v1 is symmetric.</strong> 0.7009 and 0.7006 within-source; −0.100 and
+−0.099 across. Two corpora of equal difficulty, mutually shifted.</li>
+<li><strong>MobileCLIP2-S2 inverts the ordering.</strong> Pl@ntNet is the easier corpus
+for it, 0.5827 against 0.5069.</li>
+</ul>
+
+<p>So <strong>"field photographs are harder" is a property of the encoder, not of the
+photographs.</strong> §13 explained its gap by the nature of the imagery — variable
+framing, habitat context, whole-plant shots. That explanation is right for the weak
+encoders and backwards for the strong one. The practical form: <em>train the head on the
+harder corpus</em>. Pl@ntNet's organ-framed close-ups look like the less realistic data
+and produce the more transferable head.</p>
+
+<div class="note">
+<span class="key">Two ways this could have been an artifact, both checked</span>
+<p><strong>Organ mix.</strong> The obvious worry is that the within-source control
+contains hard photo types the cross-source arm does not, which would deflate the shift and
+make "free" two offsetting biases. Measured rather than assumed, with the production
+organ router: the Pl@ntNet test set is <span class="num">3.6%</span> bark — this is a
+herbaceous catalogue, so bark is scarce there too — while iNaturalist photographs route to
+bark <span class="num">11.9%</span> of the time. Reweighting the control to the
+iNaturalist mix makes it <em>harder</em>. The null survives at
+<span class="num">+0.017 [−0.010, +0.045]</span> and the ordering is unchanged; organ mix
+accounts for about a third of the small encoders' penalty and none of BioCLIP-2's.</p>
+<p><strong>Population leakage.</strong> Two observations of one population on one day by
+one photographer are distinct subjects but not an independent draw, which would inflate
+the within-source iNaturalist cell. Re-splitting that side by 1° geographic cell, so
+training and test observations of a label come from different places, reproduces the
+asymmetry on the same labels: −0.135 against −0.148.</p>
+</div>
+
+<div class="note warn">
+<span class="key">Read a fine-tuned encoder's bounds per column</span>
+<p>PlantCLEF2024 is fine-tuned on 7,806 Pl@ntNet species, so <em>whichever cell is scored
+on Pl@ntNet is plausibly inflated at the image level</em> in a way no other encoder's is.
+That cuts both ways: it inflates P→P, so <span class="num">−0.086</span> is an
+<strong>upper bound</strong> on its deployment penalty; it also inflates i→P, so
+<span class="num">−0.160</span> is a <strong>lower bound</strong> on its reverse
+penalty.</p>
+<p>It is also the case where the mechanism is visible directly. With the production head
+it is the <em>best</em> encoder measured on Pl@ntNet — 0.7757 against BioCLIP-2's 0.7633 —
+and 8.5pp behind BioCLIP-2 on iNaturalist. Its entire deficit is a cross-source deficit:
+within-source strength that does not travel. For a card, that is the argument for naming
+the encoder's training corpus beside the evaluation corpus rather than reporting accuracy
+alone.</p>
+</div>
+
+<h3>What the source change does not touch</h3>
+
+<p>Scored through the production head, mean <span class="num">P(__OTHER__)</span> roughly
+doubles across the source change and stays negligible in absolute terms — 0.0036 → 0.0070
+for BioCLIP-2. <strong>Source shift moves the ranking, not the accept/reject
+decision</strong>, so the three-way cascade inherits the identification shift and adds
+nothing of its own.</p>
+
+<div class="note retract">
+<span class="key">What this does not establish</span>
+<p>Both corpora are inside BioCLIP-2's pretraining — iNaturalist via GBIF, Pl@ntNet via
+Meta-Album. This measures <strong>head</strong> transfer across two acquisition sources
+with an encoder familiar with both. It bounds head brittleness and says the shipped
+configuration is not resting on a source match it never had. It does <em>not</em> test
+encoder generalisation to a genuinely novel acquisition process.</p>
+<p>Two narrower limits. Pl@ntNet photographs are organ-framed close-ups by construction,
+so part of what is measured is framing convention rather than camera and hand. And both
+corpora are citizen-science apps, so the photographic culture is shared even where the
+platform is not. The open question in §16 stands, narrowed.</p>
+</div>
+</section>
+
+<section id="s16">
+<div class="sh"><p class="eyebrow">16</p><h2>Training-source composition</h2></div>
+
+<p>§15 establishes that the head is fitted on one corpus and deployed on another,
+and that the large encoders pay nothing for the change. That invites the obvious
+follow-up — <em>should the head be fitted on both?</em> — and the answer is a
+useful case of a result that is real, survives every control, and still does not
+apply to the setting this document is about.</p>
+
+<h3>In-source data is worth several times more per row</h3>
+
+<p>Adding in-source rows to the shipped head, over 349 labels, scored on held-out
+in-source photographs no arm trained on:</p>
+
+<div class="scroll"><table class="explain">
+<thead><tr><th>fitted on</th><th class="n">rows</th><th class="n">top-1</th><th>reads as</th></tr></thead>
+<tbody>
+<tr><td>out-of-source only — what ships</td><td class="n">22,772</td><td class="n">0.7999</td><td class="muted">baseline</td></tr>
+<tr class="good"><td>both</td><td class="n">29,976</td><td class="n"><b class="g">0.8718</b></td><td>+7.2pp <span class="num">[+5.5, +8.9]</span></td></tr>
+<tr><td>20 rows/label, all out-of-source</td><td class="n">6,980</td><td class="n">0.7873</td><td class="muted">volume control</td></tr>
+<tr class="good"><td>20 rows/label, half in-source</td><td class="n">6,980</td><td class="n"><b class="g">0.8666</b></td><td><b class="b">+7.9pp</b> at equal volume</td></tr>
+</tbody></table></div>
+
+<p>The last two rows are the control that matters: <strong>same row count, half
+of them swapped for in-source data, +7.9pp</strong>. It is composition, not
+volume. Sharper still — 6,980 mixed rows beat 22,772 single-source rows by
+6.7pp, so a third of the data from the right mixture beats three times as much
+from one place.</p>
+
+<div class="note warn">
+<span class="key">And it is not a uniform gain</span>
+<p>Reserve 20% of labels so that <em>no</em> in-source row of theirs enters
+training — the position any label occupies when its data simply does not exist —
+and those labels come out <strong>worse than before the mix</strong>:
+<span class="num">−0.0278 [−0.0423, −0.0154]</span>, while the labels that got
+in-source data gain <span class="num">+0.0770</span>.</p>
+<p>The mechanism is one multinomial and one argmax. Adding in-source rows moves
+the boundaries of those classes toward the deployment distribution; a class still
+represented only by out-of-source data competes against neighbours that now fit
+the test distribution better than it does, and loses ties it used to win.
+<strong>The gain and the damage are the same effect from two sides.</strong></p>
+<p><strong>And it is worst when it looks least important.</strong> Sweeping the
+reserved share: −4.7pp when only 5% of labels are in that position, −2.1pp when
+half are. A label competes against however much of the field improved, so the
+fewer such labels there are, the worse each one is treated.</p>
+</div>
+
+<h4>What does and does not fix it</h4>
+
+<div class="scroll"><table class="explain">
+<thead><tr><th>fix</th><th>effect on the reserved labels</th></tr></thead>
+<tbody>
+<tr><td>Per-class balancing (<code>class_weight="balanced"</code>)</td><td>−0.0278 → −0.0211. Helps, does not remove. <strong>Not a row-count artifact:</strong> equal weight on a class whose rows match the deployment distribution still wins more argmaxes.</td></tr>
+<tr><td>Capping in-source rows per label at 10</td><td>−0.0186, and retains 86% of the gain. The best of the cheap levers.</td></tr>
+<tr><td>Per-class logit centring on an out-of-catalogue reference pool</td><td>Mitigates at full precision and <strong>fails at int4</strong> (−0.0337). A fix that does not survive the deployable encoder is not one.</td></tr>
+<tr class="good"><td><strong>Two heads, posteriors averaged</strong></td><td>Removes it. Architecture-matched, the in-source data contributes <span class="num">−0.0001 [−0.0134, +0.0126]</span> to the reserved labels and <span class="num">+0.0664</span> to the rest.</td></tr>
+</tbody></table></div>
+
+<div class="note warn">
+<span class="key">The two-head number needs its control or it is misread</span>
+<p>Averaging two heads is an <em>ensemble</em>, and ensembles help for reasons
+having nothing to do with source. Naively, two heads give the reserved labels
+<b class="g">+0.0347</b>. A control with the second head's exact structure — same
+class composition, same row counts — drawing its rows from the <em>out-of-source</em>
+corpus instead gives <b class="g">+0.0349</b>. <strong>The entire reserved-label
+gain is the architecture.</strong> Only the difference between the two isolates
+what the data did, and that difference is zero.</p>
+</div>
+
+<h3 id="s16k">It dissolves at narrow-catalogue scale — in <em>this</em> domain</h3>
+
+<p>Every number above is measured at <span class="num">K = 345</span>. This
+document is about label sets of ten to fifty. Sweeping K, with one label in ten
+reserved, 15 random subsets per point:</p>
+
+<div class="scroll"><table>
+<thead><tr><th class="n">K</th><th class="n">damage to reserved</th><th class="n">sd over draws</th><th class="n">gain on the rest</th><th class="n">top-1</th></tr></thead>
+<tbody>
+<tr class="good"><td class="n">10</td><td class="n"><b class="g">0.0000</b></td><td class="n">0.0000</td><td class="n">+0.0083</td><td class="n">0.989</td></tr>
+<tr class="good"><td class="n">20</td><td class="n"><b class="g">−0.0093</b></td><td class="n"><b class="b">0.0238</b></td><td class="n">+0.0138</td><td class="n">~0.97</td></tr>
+<tr><td class="n">50</td><td class="n">−0.0149</td><td class="n">0.0175</td><td class="n">+0.0242</td><td class="n">0.939</td></tr>
+<tr><td class="n">100</td><td class="n">−0.0275</td><td class="n">0.0221</td><td class="n">+0.0450</td><td class="n">—</td></tr>
+<tr class="hi"><td class="n">345</td><td class="n">−0.0310</td><td class="n">—</td><td class="n">+0.0749</td><td class="n">~0.80</td></tr>
+</tbody></table></div>
+
+<p><strong>The damage is monotone in K and gone by K = 20</strong> — at K = 10
+exactly zero, at K = 20 smaller than the spread across draws. <strong>And so is
+the gain</strong>: +0.8pp at K = 10 against +7.5pp at K = 345.</p>
+
+<p>The mechanism is the accuracy ceiling. As K falls, top-1 climbs — 0.939 at
+K = 50 to 0.989 at K = 10 — and both effects are <strong>remaining accuracy</strong>
+that narrowing has already spent. There is little room left for training-source
+composition to help, and equally little for it to hurt.</p>
+
+<div class="note warn">
+<span class="key">Two quantities, one word</span>
+<p>Earlier drafts of this section called that quantity <em>headroom</em>, and
+that was a conflation worth naming explicitly, because the two are routinely
+confused and this project confused them for a while.</p>
+<div class="scroll"><table class="explain">
+<thead><tr><th>quantity</th><th>definition</th><th>governs</th></tr></thead>
+<tbody>
+<tr><td><strong>headroom</strong></td><td><span class="num">coarse-rank − fine-rank accuracy</span></td><td><strong>retreat</strong> to the group rank (§10, §17)</td></tr>
+<tr><td><strong>remaining accuracy</strong></td><td><span class="num">1 − top-1</span></td><td><strong>sensitivity</strong> to a training-data intervention (this section)</td></tr>
+</tbody></table></div>
+<p>They coincide when coarse-rank accuracy sits near 1 — the easy, small-K plant
+regime that produced the table above — and diverge everywhere else. That is not a
+quibble: breaking exactly that collinearity, by holding fine accuracy fixed and
+sweeping the grouping, <em>is</em> the §10 result. And the sweep in the next
+subsection has no coarse rank in its design at all. Two different variables, two
+different consequences, and the rest of this section turns on the difference.</p>
+</div>
+
+<h3 id="s16derm">The vanishing point is the accuracy curve, not K</h3>
+
+<p>The paragraph above offers a mechanism, and a mechanism makes a prediction
+that can be tested somewhere else. If the effects vanish because top-1 climbs
+toward ceiling, then <strong>"gone by K = 20" is not a fact about label-set
+size</strong> — it is wherever the accuracy curve for that domain and encoder
+happens to put it, and a harder domain should keep the effects at much smaller K.</p>
+
+<p>Pre-registered and run on 2,688 Fitzpatrick17k dermatology photographs, with
+Fitzpatrick skin type as the source variable — light (I–III) training, dark
+(IV–VI) deployment — 28 classes, 15 random subsets per K, cliques never split
+across train and test. Declared prediction: at K = 20, damage should exceed the
+plant value of 0.009 in magnitude and gain should exceed 0.014.</p>
+
+<div class="scroll"><table>
+<thead><tr><th class="n">K</th><th class="n">damage to reserved</th><th class="n">sd</th><th class="n">gain on the rest</th><th class="n">baseline top-1</th></tr></thead>
+<tbody>
+<tr class="hi"><td class="n">5</td><td class="n"><b class="w">−0.1072</b></td><td class="n">0.1256</td><td class="n">+0.1032</td><td class="n">0.7986</td></tr>
+<tr class="hi"><td class="n">10</td><td class="n"><b class="w">−0.1354</b></td><td class="n">0.1228</td><td class="n">+0.0893</td><td class="n">0.7177</td></tr>
+<tr class="hi"><td class="n">20</td><td class="n"><b class="w">−0.1475</b></td><td class="n">0.0915</td><td class="n">+0.1293</td><td class="n">0.6319</td></tr>
+<tr><td class="n">28</td><td class="n">−0.1260</td><td class="n">0.0992</td><td class="n">+0.1481</td><td class="n">0.5528</td></tr>
+</tbody></table></div>
+
+<p><strong>Confirmed by about an order of magnitude.</strong> At K = 10, where
+plants show <em>exactly zero</em>, dermatology loses <span class="num">13.5
+points</span> on the classes denied in-source data. At K = 5 — a five-label
+problem, the smallest thing this document contemplates — the damage is still
+10.7 points. The standard error over 15 draws is 0.024–0.032, so the damage sits
+four to five standard errors from zero at every K. Dermatology never approaches
+the ceiling: top-1 is 0.80 even at K = 5, and the effects never vanish.</p>
+
+<p><strong>It is accuracy and not the class distribution.</strong> The first
+version of this comparison was confounded — it paired plants at K = 345 with
+dermatology at K = 5, matching accuracy but mismatching label count, images per
+class and class balance. Redone at matched K = 20 by degrading the <em>plant</em>
+arm instead (weaker encoder, congener-crowded label sets, training caps), 28 arms
+with class count held fixed:</p>
+
+<div class="math">
+damage = −0.194 + 0.181 × baseline&nbsp;&nbsp;&nbsp;R² = 0.61
+<span class="where">28 arms, matched K = 20, class count fixed. Baseline is
+top-1 on the arm. Dermatology still sits above the plant curve, but by ~1.9×,
+not the 3.5× the confounded version reported — a residual of one to three
+standard errors, suggestive rather than established.</span>
+</div>
+
+<p><strong>And the residual is not the encoder.</strong> Every dermatology number
+came from one embedding set, so "dermatology sits above the plant curve" and
+"DINOv2 sits above the BioCLIP/MobileCLIP curve" were the same observation.
+Re-embedding the identical 2,688 images with the two encoders the plant curve is
+fitted on, changing nothing else:</p>
+
+<div class="scroll"><table>
+<thead><tr><th>encoder</th><th>supervision</th><th class="n">baseline top-1</th><th class="n">damage @ K = 20</th><th class="n">gain</th></tr></thead>
+<tbody>
+<tr><td>DINOv2 ViT-B/14</td><td>generic self-supervised</td><td class="n">0.632</td><td class="n">−0.1475</td><td class="n">+0.1293</td></tr>
+<tr><td>MobileCLIP2-S0</td><td>web image–text</td><td class="n">0.602</td><td class="n"><b class="w">−0.1847</b></td><td class="n">+0.1210</td></tr>
+<tr><td>BioCLIP-2 ViT-L</td><td>biology image–text</td><td class="n">0.555</td><td class="n">−0.1484</td><td class="n">+0.1463</td></tr>
+</tbody></table></div>
+
+<p>Three architectures with three supervision signals — one trained on organisms,
+none on skin — all land between −0.15 and −0.18. The pre-registration predicted
+the residual would <em>shrink</em> under a matched encoder and it did not.
+Individual residuals are one to four standard errors apiece; the evidence is the
+consistency, not any single point, and <strong>all twelve</strong> dermatology
+points — three encoders by four label-set sizes — sit above their matched plant
+curve.</p>
+
+<p>A third domain sharing no modality with either tests the best remaining
+reading — that the source variable there is a property of the <em>subject</em>
+(skin tone is in every pixel) where in plants it is a property of the
+<em>photographer</em>. Speech Commands, with speaker population as the source,
+puts a voice in every frame: damage is <strong>flat across K and largest at the
+narrow end</strong> — −0.214 at K = 5 and −0.186 at K = 10, where plants are
+zero — at 2.1–2.6× the plant curve against dermatology's 1.9–2.1×. Quote the
+shape, never the magnitude: audio's source variable is constructed by k-means,
+so its level is chosen rather than measured.</p>
+
+<div class="note retract">
+<span class="key">Retracted — the transferable lesson was keyed to the wrong variable</span>
+<p><del>For a narrow-catalogue build the practical answer is the simple one: mix
+if the data is there, do not build the two-head architecture to solve a problem
+that K = 20 dissolves, and report which labels had no in-source data rather than
+engineering around it.</del></p>
+<p>The advice was right for plants and <strong>wrong as stated</strong>. "K = 20
+dissolves it" is a plant fact wearing the clothes of a general one, and a reader
+building a twenty-label classifier in a harder domain would have followed it into
+a 14.8-point loss on exactly the labels whose data they could not get. <strong>"Small
+label sets are safe from this" is false in general.</strong></p>
+<p>What survives, restated against the variable that actually governs: <strong>key
+the decision on the build's measured top-1, never on K.</strong> Above roughly
+0.95 the effects are inside draw spread and the simple answer holds — mix if the
+data is there and report which labels had none. Below that they are live at any
+K, the reserved labels are the ones to watch, and the position they occupy is the
+one every user-chosen catalogue grows into. The card reports measured accuracy
+for this reason; it is not decoration.</p>
+</div>
+
+<div class="note">
+<span class="key">What the episode is worth</span>
+<p>This is a result that is real, replicated on two encoders, and survived an
+ensembling control, a balancing control and a composition sweep — and its
+practical guidance was still wrong, because every one of those controls asked
+<em>whether the effect was real</em> and none asked <em>which variable it was
+indexed to</em>. A scope condition read off one domain's accuracy curve is not a
+scope condition. It took a second domain to notice, and a third to explain.</p>
+</div>
+</section>
+
+
+<section id="s17">
+<div class="sh"><p class="eyebrow">17</p><h2>Starving the fine rank: three levers, one signature</h2></div>
+
+<p>§10 established headroom as the quantity governing retreat, and treated it as a property
+of the <em>label set</em>. That is incomplete. Headroom is a property of the <strong>gap
+between what the task demands and what the model can deliver</strong>, and the label set is
+only one of at least three things that opens that gap.</p>
+
+<p>Each of the three was found by a separate experiment that was not looking for the other
+two. All three produce the same signature, and on a crowded label set all three produce it
+invisibly.</p>
+
+<div class="scroll"><table class="explain">
+<thead><tr><th>lever</th><th>what was varied</th><th class="n">headroom</th><th class="n">label-level share</th></tr></thead>
+<tbody>
+<tr class="good"><td><strong>Data</strong></td><td>1 training example per label instead of hundreds</td><td class="n">0.43–0.52</td><td class="n"><b class="w">~0.01</b></td></tr>
+<tr class="good"><td><strong>Parameters</strong></td><td>a 0.14 MB student instead of a 43.3 MB encoder</td><td class="n">0.500</td><td class="n"><b class="w">0.000</b></td></tr>
+<tr class="good"><td><strong>Pixels</strong></td><td>128 px input against a teacher running at 518 px</td><td class="n">0.422</td><td class="n"><b class="w">0.000</b></td></tr>
+<tr><td class="muted">—</td><td class="muted">the same three, on a <em>separated</em> label set</td><td class="n">0.000</td><td class="muted">collapse is visible</td></tr>
+</tbody></table></div>
+
+<p>The chain is assembled entirely from parts established earlier in this document.
+Fine-rank accuracy falls; coarse-rank accuracy holds, because separating a <em>Sedum</em>
+from a <em>Trifolium</em> demands far less than separating two <em>Sedums</em>; headroom
+rises; the cascade correctly judges a group answer worth more than a decline under the
+declared utility (§5); coverage inflates and precision holds — on answers that narrow
+nothing.</p>
+
+<p><strong>What is new is that data volume, parameter count and input resolution each drive
+the first link.</strong> None of them is a property of the label set, and none was
+previously reported as affecting retreat at all.</p>
+
+<h3>Lever one: training-set size</h3>
+
+<p>Rows drawn from Pl@ntNet at <em>n</em> per label, scored on held-out iNaturalist
+observations through the unmodified measurement path, 12 draws per point, clustered by
+observation. 20 congeners, MobileCLIP2-S0:</p>
+
+<div class="scroll"><table>
+<thead><tr><th class="n">examples / label</th><th class="n">coverage</th><th class="n">precision</th><th class="n">label-level share</th><th class="n">headroom</th></tr></thead>
+<tbody>
+<tr class="hi"><td class="n">1</td><td class="n">0.283</td><td class="n"><b class="b">0.957</b></td><td class="n"><b class="w">0.006</b></td><td class="n">0.520</td></tr>
+<tr><td class="n">4</td><td class="n">0.380</td><td class="n"><b class="b">0.969</b></td><td class="n"><b class="w">0.003</b></td><td class="n">0.426</td></tr>
+<tr><td class="n">8</td><td class="n">0.404</td><td class="n">0.967</td><td class="n">0.030</td><td class="n">0.405</td></tr>
+<tr><td class="n">64</td><td class="n">0.490</td><td class="n">0.946</td><td class="n">0.161</td><td class="n">0.312</td></tr>
+<tr class="good"><td class="n">all</td><td class="n">0.487</td><td class="n">0.957</td><td class="n">0.160</td><td class="n">0.304</td></tr>
+</tbody></table></div>
+
+<p><strong>Precision is at its highest where the model is least useful</strong> — 0.969 at
+four examples, 0.946 at sixty-four. Coverage and precision both move the <em>wrong way</em>
+relative to utility across the low end of the curve. From one example per label a card would
+report <em>"answers 28% of queries at 96% precision"</em> for a model naming an actual label
+on 0.6% of in-set observations.</p>
+
+<p>On a separated set of the same size the curve is ordinary: 0.038 → 0.489 monotone in
+shots, tracking coverage, with headroom never exceeding 0.047.</p>
+
+<h4>Buying a better encoder does not help — and that is specific to the few-shot regime</h4>
+
+<div class="scroll"><table>
+<thead><tr><th>encoder</th><th class="n">int4</th><th class="n">separated, 1</th><th class="n">separated, all</th><th class="n">crowded, 1</th><th class="n">crowded, all</th></tr></thead>
+<tbody>
+<tr><td>MobileCLIP2-S0</td><td class="n">5.7 MB</td><td class="n">0.092</td><td class="n">0.580</td><td class="n">0.013</td><td class="n">0.168</td></tr>
+<tr><td>MobileCLIP2-S2</td><td class="n">17.9 MB</td><td class="n">0.147</td><td class="n">0.644</td><td class="n">0.004</td><td class="n">0.187</td></tr>
+<tr><td>PlantCLEF2024</td><td class="n">43.3 MB</td><td class="n">0.538</td><td class="n">0.847</td><td class="n">0.008</td><td class="n">0.210</td></tr>
+<tr class="hi"><td>BioCLIP-2</td><td class="n">152 MB</td><td class="n"><b class="g">0.714</b></td><td class="n"><b class="g">0.908</b></td><td class="n"><b class="w">0.010</b></td><td class="n">0.471</td></tr>
+</tbody></table></div>
+
+<p>Four cells, three different answers. <strong>Separated at one shot: encoder quality is
+worth 7.8×</strong> and is monotone in size — one example through BioCLIP-2 beats
+sixty-four through MobileCLIP2-S0. <strong>Crowded at one shot: worth nothing</strong> —
+everything lands between 0.004 and 0.013 and the ordering does not hold, with the 17.9 MB
+encoder last and the 152 MB encoder not first. A 27× range of model size produces no signal.
+<strong>Crowded at full data: worth 2.8×</strong>, ordering restored.</p>
+
+<p>So the few-shot regime is where encoder selection — the one lever left open after
+regularisation, small-encoder ensembling and test-time augmentation all returned null —
+stops working.</p>
+
+<div class="note">
+<span class="key">On the eight-examples claim</span>
+<p>SetFit's premise is that eight labelled examples per class suffice. <strong>On a separated
+label set with a strong encoder it is exact, not approximate:</strong> BioCLIP-2 reaches
+0.911 at eight examples against 0.908 with every available row — 100% — and PlantCLEF2024
+reaches 103%. Eight examples is <em>saturated</em>, and the whole remaining gap is the
+encoder rather than the data.</p>
+<p>On a crowded set the same ratio is 18–82% and still climbing at sixty-four. The claim
+holds exactly in the configuration where the user needed the least help.</p>
+</div>
+
+<h4>It replicates in audio</h4>
+
+<p>Speech Commands, wav2vec2-base, K=7, speaker-disjoint splits, groups from k-means over
+per-word centroids rather than semantics — because semantic groups are not groups to the
+encoder (§10). At four examples per label:</p>
+
+<div class="scroll"><table>
+<thead><tr><th>arm</th><th class="n">coverage</th><th class="n">precision</th><th class="n">label-level share</th><th class="n">answered rows</th></tr></thead>
+<tbody>
+<tr class="hi"><td>7 words, one acoustic cluster</td><td class="n"><b class="b">0.477</b></td><td class="n"><b class="b">0.926</b></td><td class="n"><b class="w">0.0011</b></td><td class="n">20,988</td></tr>
+<tr class="good"><td>7 words, seven clusters</td><td class="n">0.026</td><td class="n">0.737</td><td class="n"><b class="g">0.0304</b></td><td class="n">455</td></tr>
+</tbody></table></div>
+
+<p><strong>Eighteen times the coverage at higher precision, naming a label twenty-eight times
+less often.</strong> Cleaner than the plant case, where the crowded arm was at least worse at
+naming labels. The coverage ratio between arms runs 907× → 18.6× → 1.21× at one, four and
+unlimited examples, so the distortion is a function of scarcity and disappears with enough
+data.</p>
+
+<p class="muted">Precision is reported only where it has a denominator: the separated arm
+answers 8 rows at one example and 10 at two, across all twelve draws, where a printed
+precision would be noise wearing a decimal point. Note that <code>coverage × n_test</code>
+does not give this count — coverage is reweighted to the assumed out-of-set prevalence
+(§6), so multiplying it by a raw row count mixes a weighted rate with an unweighted
+denominator and overstates by roughly 2×.</p>
+
+<h3>Levers two and three: parameters and pixels</h3>
+
+<p>A student trained against the teacher's <em>posteriors over the user's labels</em> — not
+its embedding, which is the objective both closed distillation attempts used (§13). Teacher
+PlantCLEF2024 at K=14 congeners, everything scored cross-source through the unmodified
+path.</p>
+
+<div class="scroll"><table>
+<thead><tr><th>student</th><th class="n">top-1</th><th class="n">headroom</th><th class="n">label-level share</th></tr></thead>
+<tbody>
+<tr><td>0.14 MB @ 128 px</td><td class="n">0.277</td><td class="n">0.500</td><td class="n"><b class="w">0.000</b></td></tr>
+<tr><td>0.14 MB @ 224 px</td><td class="n">0.355</td><td class="n">0.496</td><td class="n"><b class="w">0.000</b></td></tr>
+<tr><td>1.53 MB @ 128 px</td><td class="n">0.388</td><td class="n">0.422</td><td class="n"><b class="w">0.000</b></td></tr>
+<tr><td>1.53 MB @ 224 px</td><td class="n">0.492</td><td class="n">0.291</td><td class="n">0.174</td></tr>
+<tr class="hi"><td>teacher · 43.3 MB @ 518 px</td><td class="n"><b class="g">0.897</b></td><td class="n">0.119</td><td class="n"><b class="g">0.554</b></td></tr>
+</tbody></table></div>
+
+<p>Monotone in all three columns. As effective capacity rises, fine-rank accuracy rises,
+headroom falls, and the label share rises with it. This ladder is the most direct evidence in
+this document that headroom tracks capability rather than label structure — and it came from
+an experiment designed to answer a different question.</p>
+
+<h4>Why three rows read exactly 0.000</h4>
+
+<p>Not a defect. With the utilities declared in §5 — a correct label <span class="num">+1</span>,
+a wrong answer <span class="num">−4</span>, declining an in-set observation
+<span class="num">0</span> — naming a label beats declining only when</p>
+
+<div class="math">
+p · 1 + (1 − p) · (−4) &gt; 0  ⟺  p &gt; 0.800
+<span class="where">so the cascade names a label only where it is 80% confident. Compare the
+group-rank break-even of 0.889 derived the same way in §9.</span>
+</div>
+
+<p>Below roughly 0.45 top-1 on a crowded set, no model reaches that on any single label, so
+it names none. The zeros are a threshold declining to defend an answer it cannot defend.</p>
+
+<div class="note warn">
+<span class="key">Consequence for measurement</span>
+<p><strong>The label-level share is a gated quantity, not a smooth function of
+accuracy.</strong> Below the cliff it is pinned at zero and cannot register an improvement,
+which makes it the wrong instrument for detecting saturation there. Measured on the label
+share, the 0.14 MB student looks saturated between 128 px and 224 px (0.000 → 0.000);
+measured on fine-rank accuracy it plainly is not (0.277 → 0.355, <b class="b">+7.9pp</b>).
+Any saturation test in this regime must run on the fine-rank accuracy.</p>
+</div>
+
+<div class="note retract">
+<span class="key">Settled: distillation closes</span>
+<p>The pre-registered condition was met six times at 128–224 px and <del>was not
+applied</del>, because the students ran against a teacher at 518 and one resolution step had
+taken the crowded arm from <del>0.000</del> to 0.174. <strong>It has since been run at the
+teacher's own resolution and the answer did not move:</strong> a 0.14 MB student at 518 px
+reaches <b class="w">0.190</b> separated against a 0.849 pass bar and <b class="w">0.000</b>
+crowded against a 0.404 fail bar. Condition (a) is satisfied and applied — <strong>task-conditional
+distillation closes</strong>, with no outstanding objection.</p>
+<p>Resolution was near its ceiling: extrapolating the 128 → 224 step predicted top-1 0.45 and
+0.59, and the run measured <strong>0.4711</strong> and <strong>0.6281</strong>.</p>
+<p><strong>And the cliff is not reducible to top-1.</strong> The 0.14 MB student at 518 px hit
+top-1 0.471 and named <em>zero</em> labels, where the 1.53 MB student at top-1 0.492 named
+17.4%. The smaller model is right about as often and <em>confident</em> far less often, so it
+rarely clears p &gt; 0.800 even when its argmax is correct. Capacity buys sharpness as well as
+accuracy, and the gate reads the first.</p>
+<p class="muted">Latency at 518 px was 1.36–1.41 ms/img at batch 1, so the &ldquo;small file,
+expensive computation&rdquo; worry did not materialise — 138k parameters stay cheap even at
+the teacher's resolution. That is an A100 figure and is <em>not</em> comparable to
+PlantCLEF2024's 38.6 ms on MPS.</p>
+</div>
+
+<h3>The asymmetry that makes this the argument for the card</h3>
+
+<p>Every configuration above fails. On the separated arm the failure is <strong>obvious</strong>:
+headroom is 0.000 by construction, because one label per group means a group answer
+<em>is</em> a label answer, so there is nothing to retreat to. The cascade declines instead
+and coverage collapses to 0.09–0.23, where any reader sees it.</p>
+
+<p>On the crowded arm the identical failure reports <strong>coverage 0.11–0.15 at precision
+0.937–0.972</strong>. Same model, same training, same magnitude of failure, opposite
+legibility.</p>
+
+<p><strong>The crowded label set is not more fragile. It is better at concealing that it
+broke.</strong> That is the case for reporting the label-level share beside coverage and
+precision, reached from three directions that have nothing to do with label sets.</p>
+
+<div class="note">
+<span class="key">The fourth lever runs the other way</span>
+<p>Data, parameters and pixels all <em>lower</em> fine-rank accuracy while coarse-rank
+accuracy holds, which opens headroom. <strong>Narrowing the label set does the reverse</strong>
+— it raises fine accuracy toward the ceiling, and the headroom closes with it. That is
+why a crowded <em>and</em> tiny label set can look healthy where a crowded and large one
+does not, and why the retreat in §9's 14-label crowded arm is as large as it is despite
+K being small: relatedness reopens what narrowing closed.</p>
+<p>It is also the reason §16's scope condition has to be stated in accuracy rather than
+in K. Narrowing is a <em>proxy</em> for a high operating accuracy and a reliable one only
+where the encoder is strong for the domain. Where it is not, K falls and the gap stays
+open — and both the retreat in this section and the intervention sensitivity in §16 stay
+live at five labels. The card measures the accuracy instead of assuming it follows from
+the label count.</p>
+</div>
+</section>
+
+
+<section id="s18">
+<div class="sh"><p class="eyebrow">18</p><h2>Failure modes and open questions</h2></div>
 
 <h3>Known failure modes</h3>
 <ul>
@@ -1230,7 +1866,17 @@ merely lower, it is less durable.</em></p>
 tool warns; it cannot solve.</li>
 <li><strong>Near-OOD is the weakest bucket.</strong> Siblings of chosen labels that were
 left <em>outside</em> the set have no correct answer available. On one build, only 16.9%
-were answered and 59.6% of those were correct — against 98.1% on in-set rows.</li>
+were answered and 59.6% of those were correct — against 98.1% on in-set rows.
+<em>Partly addressable, and measured:</em> every score in the cascade comes from
+the posterior, which is closed-set and cannot express "none of these" — exactly
+the near-OOD case. Adding a <strong>novelty</strong> gate that retreats to the
+group rank when an observation sits far from every label's training data takes
+answered-wrong from <span class="num">0.224</span> to
+<span class="num">0.124</span> with coverage unchanged. It is not shipped: at a
+20% out-of-set rate that bucket is 6.4% of traffic, so expected utility moves
+<span class="num">+0.017 [−0.004, +0.040]</span> — a null. Gating on
+<code>group_conf</code> instead is <em>negative</em>, so a closed-set score
+cannot do this job however well it correlates with one that can.</li>
 <li><strong>Group answers can be vacuous.</strong> §9. The flat 0.5 utility is the
 proximate cause.</li>
 <li><strong>Retreat can be silently swallowed by declining.</strong> §11. At a high assumed
@@ -1249,16 +1895,19 @@ Ranking by embedding distance is the fix.</li>
 
 <h3>Open questions</h3>
 <ol>
-<li><strong>Domain shift — still open, and one attempt did not settle it.</strong>
-Contamination is measured and small; the trap generalises across kingdoms; but every plant
-number in both repos comes from iNaturalist photographs, and nobody has pointed a
-different camera at a plant and asked. The dermatology population shift in §11 was built
-to attack the general version of this and produced a declared null: the axis moved
-accuracy by less than seed noise in three of four conditions. A genuinely different
-acquisition source — a second atlas, or consumer phone photographs against clinical ones —
-remains the experiment worth running. The obvious candidate, splitting Fitzpatrick17k
-across its two source atlases, is currently unrunnable: DermaAmin supplies 12,631 of its
-16,577 rows and that host is suspended.</li>
+<li><strong>Domain shift — narrowed, not closed.</strong>
+<del>Every plant number in both repos comes from iNaturalist photographs, and nobody has
+pointed a different camera at a plant and asked.</del> Half of that was wrong about its
+own evaluation: the heads were fitted on Pl@ntNet all along, and §15 supplies the
+within-source control that was missing. The acquisition-source axis is now measured and
+the answer is an interaction with encoder scale — free at ViT-L, −17.9pp at 17.9 MB.
+<strong>What remains is the harder version.</strong> Both corpora sit inside the encoder's
+pretraining and both are citizen-science apps, so §15 bounds <em>head</em> brittleness
+rather than encoder generalisation. A genuinely novel acquisition process — pressed
+herbarium specimens, or photographs taken on one camera in one pair of hands — is still
+the experiment worth running. The dermatology analogue is still blocked: splitting
+Fitzpatrick17k across its two source atlases is unrunnable because DermaAmin supplies
+12,631 of its 16,577 rows and that host is suspended.</li>
 <li><strong>An operating-point term in the retreat rule.</strong> §11 shows group share is
 jointly determined by headroom and <span class="num">p<sub>ood</sub></span>. A two-variable
 rule is the obvious next form, and it needs arms that vary both — the 1,409 existing arms
@@ -1277,7 +1926,25 @@ unit-norm embedding while being incorrect. The deployment claim for the 43 MB op
 unverified on-device.</li>
 <li><strong>Encoder generality.</strong> The bird replication used the same encoder. The
 trap is established across label hierarchy and visual domain, not across encoders or
-data sources.</li>
+data sources. <em>Partly answered by §17</em>, which sweeps four encoders spanning 27× in
+size through the few-shot regime and finds the ordering vanishes entirely on crowded sets at
+one example per label.</li>
+<li><strong>One GPU run decides the tiny-model question.</strong> A student trained at the
+teacher's own 518 px, on both arms. Everything upstream is built and reproducible from cached
+vectors in minutes; this is the only remaining step that needs hardware this project does not
+have, at roughly two hours per arm. Until it runs, §17's verdict stays <em>not
+demonstrated</em> rather than either direction.</li>
+<li><strong>The card does not report how many rows per label it was fitted on.</strong> A
+user with eight examples per class and one with eight hundred receive identical cards, while
+§17 shows the crowded curve still climbing steeply at sixty-four. &ldquo;Your label share is
+data-limited&rdquo; is measurable from data already in the bundle, actionable, and currently
+unsaid — the smallest thing this document implies and the clearest omission in the tool.</li>
+<li><strong>Contrastive body-tuning is untried.</strong> SetFit fine-tunes its encoder on
+pairs drawn from the user's own examples; everything here holds the encoder frozen and fits a
+linear head over it. That middle ground between frozen and fully fine-tuned has never been
+measured in this project, and on §17's evidence it is the cheapest remaining lever — the
+few-shot deficit is concentrated exactly where a better <em>metric</em> would help and a
+bigger encoder demonstrably does not.</li>
 </ol>
 </section>
 
@@ -1287,15 +1954,25 @@ data sources.</li>
 reproducible from <a href="https://github.com/semajyllek/narrowcast-plantid">plantid</a> — see
 <code>EMBEDDED_FINDINGS.md</code>, <code>OREGON_SAFETY_FINDINGS.md</code>,
 <code>BIRDS_FINDINGS.md</code>, <code>HEADROOM_FINDINGS.md</code>,
-<code>CONTAMINATION_FINDINGS.md</code> and the pre-registrations. §11 is reproducible from
+<code>CONTAMINATION_FINDINGS.md</code>, <code>DOMAIN_SHIFT_FINDINGS.md</code>,
+<code>SOURCE_MIX_FINDINGS.md</code>, <code>NEAR_OOD_FINDINGS.md</code> and the
+pre-registrations. §11 and §16's K sweep are reproducible from
 <a href="https://github.com/semajyllek/narrowcast-derm">narrowcast-derm</a>, whose
 <code>PREREGISTRATION.md</code> was committed before any head was fitted and whose
-<code>ood_sweep.py</code> produces the table directly.</p>
-<p>Two claims in this document are retracted versions of earlier ones, marked in place
-rather than deleted: the frontier's transfer across image sources (§13) and the direction
-of the contamination confound (§14). A third is qualified rather than retracted: the
-<span class="num">1.8 × headroom</span> rule of §10 holds as a floor only at a stated
-operating point, per §11.</p>
+<code>ood_sweep.py</code> and <code>k_sweep.py</code> produce those tables directly
+— see <code>K_FINDINGS.md</code> there. §16's audio replication is
+<code>SOURCE_MIX_FINDINGS.md</code> in
+<a href="https://github.com/semajyllek/narrowcast-kws">narrowcast-kws</a>.</p>
+<p><strong>Four</strong> claims in this document are retracted versions of earlier ones,
+marked in place rather than deleted: the frontier's transfer across image sources (§13), the
+direction of the contamination confound (§14), the closure of distillation (§13, reopened in
+§17 on the grounds that both closed attempts optimised a general embedding at K=490), and
+<strong>§16's guidance that narrowing to K = 20 dissolves the training-source trade-off</strong>
+— true of plants, false in general, and keyed to the wrong variable. Two more are
+qualified rather than retracted: the <span class="num">1.8 × headroom</span> rule of §10 holds
+as a floor only at a stated operating point, per §11 — and §17 shows headroom is not a
+property of the label set at all, but of the gap between task demand and model capability,
+which data volume, parameter count and input resolution each widen.</p>
 <p>Nothing here is verification. Do not eat anything on the basis of a model built this
 way.</p>
 </footer>

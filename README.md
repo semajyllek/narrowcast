@@ -36,6 +36,11 @@ Reproduced outside biology: on birds, a *Larus*/*Calidris* set scored **higher**
 coverage than 13 distinct genera while label-level fell 0.958 → 0.718. The trap
 is a property of hierarchical label sets, not of plants.
 
+The full account — what governs the trap, when it fires, and the operating point
+that decides whether it fires at all — is in
+**[docs/deep_dive.html](docs/deep_dive.html)**, an 18-section technical reference
+with every number traced to a findings doc.
+
 ## It takes a dataset; it does not fetch one
 
 | flag | shape |
@@ -295,6 +300,13 @@ pip install -e '.[encode]'  # adds torch/open_clip to turn images into vectors
 ```
 
 ## Provenance
+
+**The reference document is [`docs/deep_dive.html`](docs/deep_dive.html)** — 18
+sections covering the decision rule and its calibration, the evaluation protocol,
+the metric pathology this project exists to expose, and the experiments that
+established or killed each claim. Open it in a browser; it is self-contained.
+Three episodes where a wrong number was believed for a time are recorded in place
+in §6, §8 and §14, struck through rather than deleted.
 
 Extracted from [plantid](https://github.com/semajyllek/narrowcast-plantid). Every claim on
 this page is backed by a measurement there — see `EMBEDDED_FINDINGS.md`,

@@ -94,6 +94,16 @@ behaviour: `label_share`, `group_share`, `decline_share`. Established in
 narrowcast-plantid's `HEADROOM_FINDINGS.md` over 1,409 arms — headroom predicts group-answer
 share at CV R² 0.883 against 0.362 for label accuracy alone.
 
+**Headroom is `coarse − fine`, not `1 − top-1`.** Both get called headroom across
+the four repos and they govern different things: `coarse − fine` governs
+**retreat**, `1 − top-1` governs **sensitivity to a training-data intervention**
+(narrowcast-derm's `K_FINDINGS.md`). They coincide only where coarse accuracy
+sits near 1, which is the easy small-K regime — and the whole point of the
+1,409-arm result is that it was established by breaking exactly that
+collinearity. Anything keyed on K rather than on measured top-1 is keyed to a
+proxy: at K=10 plants show *exactly zero* intervention damage and dermatology
+loses 13.5pp. **"Small label sets are safe" is false in general.**
+
 **`plan` cannot do this, and an earlier version of this file wrongly said it
 could.** `cmd_plan` takes a list of label strings; it never loads an image, a
 vector or a fitted head, and `projection` interpolates a shipped grid. Headroom
