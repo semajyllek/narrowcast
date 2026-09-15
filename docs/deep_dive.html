@@ -178,6 +178,12 @@ backing-off the rule is trying to predict moves from <strong>13.8%</strong> of
 observations to <strong>0.15%</strong>, a factor of 91, while the rule's own prediction
 sits unchanged at 22.3% the whole time. <strong>The prediction is meaningless until that
 assumption is named.</strong></p>
+<p><strong>§11 now names it, and the corrected rule is multiplicative:</strong></p>
+<div class="math">group_share  ≈  headroom × (2.03 − 1.86 × p<sub>ood</sub>)</div>
+<p>Retreat is a <em>fraction of the headroom available</em>, and the declared out-of-list
+rate sets the fraction. At <span class="num">p<sub>ood</sub> = 0.2</span> the multiplier is
+1.65 — which is where <span class="num">1.8 ×</span> came from. It was one slice through a
+function of an assumption nobody had varied, not a mistake.</p>
 </div>
 
 <div class="stats">
@@ -189,6 +195,7 @@ assumption is named.</strong></p>
   <div class="stat"><b>2.5%</b><span>worst single confusion declared in advance — the same model</span></div>
   <div class="stat b"><b>0.883</b><span>CV R² of <em>headroom</em> predicting the back-off, 1,409 arms</span></div>
   <div class="stat"><b>91×</b><span>how far that back-off moves at <em>fixed</em> headroom, changing only one declared assumption</span></div>
+  <div class="stat g"><b>2.03 − 1.86p</b><span>the corrected multiplier on headroom, fitted over 10,570 arm-by-operating-point rows (§11)</span></div>
   <div class="stat b"><b>0.6%</b><span>labels named from one example each, crowded set — at 96% reported precision (§17)</span></div>
   <div class="stat"><b>3</b><span>independent levers that open headroom: data, parameters, pixels (§17)</span></div>
 </div>
@@ -846,7 +853,10 @@ touched. It can, to cross-validated R² 0.883, and the predictor is
 
 <div class="math">
 h = accuracy(coarse rank) − accuracy(fine rank)&nbsp;&nbsp;<span class="muted">on in-set calibration rows</span><br><br>
-group share ≈ 1.8 · h&nbsp;&nbsp;<span class="muted">— as a <em>floor</em>, not a point estimate</span>
+group share ≈ 1.8 · h&nbsp;&nbsp;<span class="muted">— as a <em>floor</em>, not a point estimate.
+<b>Superseded by §11:</b> the multiplier is not a constant but
+2.03 − 1.86 · p<sub>ood</sub>, which returns 1.65 at the
+p<sub>ood</sub> = 0.2 every arm below was fitted at.</span>
 </div>
 
 <p>Fitted over <strong>1,409 arms</strong> spanning plants, birds, text and two audio
@@ -1085,6 +1095,98 @@ near-duplicate clique (~45–290 per arm), which gives tight intervals while con
 difficulty — the dominant variance component — goes unresampled. Every figure above
 therefore reports a second interval resampling the six <em>conditions</em>. Quoting the
 clique interval alone would understate the uncertainty severalfold.</p>
+</div>
+
+<h3 id="s11fix">The corrected rule</h3>
+
+<p>The refutation above stood for some time without a replacement, and the reason was
+mechanical: <code>p_ood</code> was a constant in the sweep that produced the 1,409 arms, so
+every one of them sat at <span class="num">0.2</span> and a term that never varies cannot be
+estimated. Making it an axis gives <strong>10,570 rows</strong> — 1,406 published arms and
+700 newly swept ones across plants, dermatology and keyword spotting, each scored at five
+operating points.</p>
+
+<div class="math">
+group_share  ≈  headroom × (2.03 − 1.86 × p<sub>ood</sub>)
+<span class="where">Grouped 5-fold CV R² <b>+0.7433</b>, folds keyed on the label-set
+identity. Against +0.6472 for headroom alone and +0.7442 for a free three-term model —
+so two parameters buy what three do.</span>
+</div>
+
+<p><strong>Retreat is a fraction of the headroom available, and the operating point sets the
+fraction.</strong></p>
+
+<div class="scroll"><table>
+<thead><tr><th class="n">p<sub>ood</sub></th><th>multiplier</th><th>reads as</th></tr></thead>
+<tbody>
+<tr><td class="n">0.05</td><td class="n">1.93 × headroom</td><td class="muted">nearly all of it realised</td></tr>
+<tr class="hi"><td class="n">0.20</td><td class="n"><b class="b">1.65 × headroom</b></td><td>the operating point every published arm used</td></tr>
+<tr><td class="n">0.60</td><td class="n">0.91 × headroom</td><td class="muted">about half of it</td></tr>
+</tbody></table></div>
+
+<div class="note">
+<span class="key">This explains §10's rule rather than discarding it</span>
+<p><span class="num">1.8 ×</span> is the multiplier at <span class="num">p<sub>ood</sub> ≈
+0.2</span>, and every arm behind that rule was fitted at exactly that value. The rule was
+never wrong — it was <em>one slice</em> through a function of an assumption nobody had
+varied. Quote the multiplier with its operating point and the original number falls out.</p>
+<p>It also repairs a defect the additive form had. Fitting
+<span class="num">a + b·headroom + c·p<sub>ood</sub></span> predicts <strong>negative</strong>
+retreat at zero headroom and high <code>p_ood</code>; six of thirty out-of-domain predictions
+were negative. Both terms here are proportional to headroom, so zero headroom gives zero
+retreat by construction — which is what §10's P1 measures.</p>
+</div>
+
+<h3 id="s11dom">The domain difference was a headroom difference</h3>
+
+<p>Fitted per domain, the additive coefficient looked like a property of the domain —
+<span class="num">−0.300</span> on dermatology against <span class="num">−0.177</span> on
+plants. It is not. Binned by fine-rank accuracy and pooled <em>across</em> domains, it moves
+monotonically, and every band holds more than one domain:</p>
+
+<div class="scroll"><table>
+<thead><tr><th>fine accuracy</th><th class="n">rows</th><th>domains in band</th><th class="n">mean headroom</th><th class="n">b(p<sub>ood</sub>)</th></tr></thead>
+<tbody>
+<tr><td>&lt; 0.65</td><td class="n">1,070</td><td class="muted">derm + plants</td><td class="n">0.228</td><td class="n"><b class="w">−0.370</b></td></tr>
+<tr><td>0.65–0.75</td><td class="n">4,355</td><td class="muted">derm + plants</td><td class="n">0.171</td><td class="n">−0.327</td></tr>
+<tr><td>0.75–0.82</td><td class="n">990</td><td class="muted">derm + kws + plants</td><td class="n">0.123</td><td class="n">−0.230</td></tr>
+<tr><td>0.82–0.88</td><td class="n">1,105</td><td class="muted">derm + kws + plants</td><td class="n">0.064</td><td class="n">−0.165</td></tr>
+<tr class="good"><td>&gt; 0.88</td><td class="n">3,030</td><td class="muted">kws + plants</td><td class="n">0.033</td><td class="n"><b class="g">+0.028</b></td></tr>
+</tbody></table></div>
+
+<p>Accuracy and headroom fall together down that table, so the control is what separates
+them. <strong>Restricted to headroom between 0.08 and 0.14</strong>, dermatology at fine
+0.702 gives <span class="num">b(p<sub>ood</sub>) = −0.2068</span> and plants at fine 0.802
+gives <span class="num">−0.1996</span>. At matched headroom the two are
+indistinguishable.</p>
+
+<p>So the governing quantity is headroom, exactly as §10 says. Weak models simply have more
+of it, which is why the operating point appears to cost them more — and why
+<strong>dermatology's 91× was never a fact about dermatology</strong>. It was a boundary
+condition reachable anywhere the model is weak enough, which is what §11 predicted and this
+now measures.</p>
+
+<div class="note warn">
+<span class="key">Quote the multiplier, not the span</span>
+<p>Across <code>p_ood</code> 0.05 → 0.60 realised retreat moves 1.6× on 148 crowded plant
+arms, 3.2× on 15 keyword-spotting arms and 5.9× on 49 dermatology arms. A span is a
+<em>ratio</em> and inflates wherever the denominator is small, which is why keyword spotting
+ranks second on span and last on coefficient. The 91× above is a ratio measured at an
+operating point where the denominator had nearly vanished. The multiplier is the stable
+statement.</p>
+</div>
+
+<div class="note retract">
+<span class="key">What this rests on</span>
+<p>Dermatology's crowded sets all come from one family — only <em>inflammatory</em> has
+enough labels to fill one at K = 20–30 — so they are a legitimate crowded-set measurement
+and <strong>not</strong> a crowded-versus-varied claim about dermatology. Its clusters
+average 1.18 rows, so splits and bootstraps there are effectively row-level and its
+intervals are narrower than the plant ones for reasons unrelated to measurement quality.
+Keyword spotting never reached the weak band (fine ≈ 0.83 even at K = 20) and contributes
+the accuracy <em>spread</em> rather than weak arms. Eighteen dermatology and fifteen
+keyword-spotting label sets: better than the one arm per domain this replaces, and not a
+large number.</p>
 </div>
 </section>
 
@@ -1925,10 +2027,14 @@ herbarium specimens, or photographs taken on one camera in one pair of hands —
 the experiment worth running. The dermatology analogue is still blocked: splitting
 Fitzpatrick17k across its two source atlases is unrunnable because DermaAmin supplies
 12,631 of its 16,577 rows and that host is suspended.</li>
-<li><strong>An operating-point term in the retreat rule.</strong> §11 shows group share is
-jointly determined by headroom and <span class="num">p<sub>ood</sub></span>. A two-variable
-rule is the obvious next form, and it needs arms that vary both — the 1,409 existing arms
-were nearly all fitted at <span class="num">p<sub>ood</sub> = 0.2</span>.</li>
+<li><del><strong>An operating-point term in the retreat rule.</strong> A two-variable rule
+is the obvious next form, and it needs arms that vary both — the 1,409 existing arms were
+nearly all fitted at <span class="num">p<sub>ood</sub> = 0.2</span>.</del>
+<strong>Answered</strong> — the constant was made an axis and the arms swept, giving
+<span class="num">headroom × (2.03 − 1.86 × p<sub>ood</sub>)</span> over 10,570 rows (§11).
+What remains open is narrower: the weak arms come from <em>one</em> corpus in
+<em>one</em> domain, so the multiplier's slope is measured across a real accuracy range but
+a thin set of label sets.</li>
 <li><strong>A group-informativeness utility term.</strong> Would fix the vacuous-group
 degeneracy. Must be declared before being fitted.</li>
 <li><strong>A <code>--holdout-column</code> in the tool.</strong> §11's experiment required
@@ -1986,8 +2092,8 @@ direction of the contamination confound (§14), the closure of distillation (§1
 §17 on the grounds that both closed attempts optimised a general embedding at K=490), and
 <strong>§16's guidance that narrowing to K = 20 dissolves the training-source trade-off</strong>
 — true of plants, false in general, and keyed to the wrong variable. Two more are
-qualified rather than retracted: the <span class="num">1.8 × headroom</span> rule of §10 holds
-as a floor only at a stated operating point, per §11 — and §17 shows headroom is not a
+qualified rather than retracted: the <span class="num">1.8 × headroom</span> rule of §10 is
+the <span class="num">p<sub>ood</sub> = 0.2</span> slice of the multiplicative form §11 measures — and §17 shows headroom is not a
 property of the label set at all, but of the gap between task demand and model capability,
 which data volume, parameter count and input resolution each widen.</p>
 <p>Nothing here is verification. Do not eat anything on the basis of a model built this
