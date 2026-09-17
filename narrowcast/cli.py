@@ -55,7 +55,13 @@ def cmd_audit(args):
                 "--background-embeddings is for --embeddings only. With --scores "
                 "the out-of-list rows are already in the file: any row whose "
                 "label is not among `classes` is one, and it is bucketed by group.")
-        chosen = sorted(set(rows.classes.tolist()))
+        # `__OTHER__` is a reject class, not a label the user chose. Leaving it in
+        # counted it among the labels, put it on the card, fed it to `analyse` as
+        # if it were a real group member, and would have let
+        # `--never-answer "__OTHER__"` validate as a legitimate label.
+        chosen = sorted(set(rows.classes.tolist()) - {B.OTHER})
+        if not chosen:
+            raise SystemExit("`classes` holds nothing but the reject class")
         ds = B.load_scored(rows)
         source = args.scores
     else:
@@ -129,7 +135,7 @@ def cmd_audit(args):
     metrics = B.fit_and_measure(frame, p_ood=args.ood_rate, hazards=hazards,
                                 groups=gmap, utility=utility,
                                 hazards_absent=absent, never_answer=never,
-                                labels=chosen)
+                                labels=chosen, gate=args.gate_near_ood)
 
     if args.deployment_origin:
         if scored:
@@ -231,6 +237,16 @@ def main(argv=None):
                               "poison hemlock among things they mean to eat, so "
                               "--hazard refuses it and the risk goes unmeasured. "
                               "Needs rows for it in the data. Repeatable.")
+    p_audit.add_argument("--gate-near-ood", action="store_true",
+                         help="fit a third threshold on `1 - P(__OTHER__)`: a row "
+                              "whose mass sits mostly outside the label set is "
+                              "answered at the group rank rather than named. "
+                              "Fitted against your declared utility, so if it "
+                              "does not pay at your payoffs the fit turns it off "
+                              "and the card says so. plantid measured it as a "
+                              "utility null at `wrong -4` and did not ship it; it "
+                              "is the near-OOD bucket it helps, which is where a "
+                              "forager's hazard lives.")
     p_audit.add_argument("--never-answer", action="append", metavar="LABEL",
                          help="a label this model will never emit: when the "
                               "cascade would name it, it declines instead. The "

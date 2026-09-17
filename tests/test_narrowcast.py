@@ -1484,3 +1484,54 @@ def test_measuring_a_suppression_without_the_label_set_is_refused():
     df = _e2e_frame()
     with pytest.raises(ValueError, match="needs `labels`"):
         build.fit_and_measure(df, p_ood=0.2, never_answer=["G0 sp0"])
+
+
+# ---- the third threshold: retreat when the row looks out-of-list -------------
+
+def test_a_low_novelty_row_that_also_fails_the_group_threshold_still_declines():
+    """The one place the three-way order can silently invert. The novelty gate
+    *retreats* — label to group — and a retreat must never override a decline, or
+    the gate would start answering rows the cascade had rejected."""
+    lv = cascade.decide(np.array([0.9]), np.array([0.1]),   # group_conf below t_group
+                        t_group=0.5, t_label=0.5,
+                        novelty=np.array([0.0]), t_novel=0.9)
+    assert list(lv) == [build.DECLINE]
+
+
+def test_the_gate_retreats_a_confident_label_answer_to_the_group():
+    lv = cascade.decide(np.array([0.99]), np.array([0.99]), t_group=0.5, t_label=0.5,
+                        novelty=np.array([0.1]), t_novel=0.9)
+    assert list(lv) == [build.GROUP]
+
+
+def test_without_a_gate_decide_is_exactly_what_it_was():
+    rng = np.random.default_rng(0)
+    lc, gc = rng.random(200), rng.random(200)
+    base = cascade.decide(lc, gc, 0.4, 0.6)
+    assert list(cascade.decide(lc, gc, 0.4, 0.6, novelty=None, t_novel=None)) \
+        == list(base)
+    # and a threshold at or below the minimum gates nothing
+    nov = rng.random(200)
+    assert list(cascade.decide(lc, gc, 0.4, 0.6, nov, nov.min())) == list(base)
+
+
+def test_a_reject_class_in_the_posteriors_is_not_one_of_the_users_labels(tmp_path):
+    """`__OTHER__` is what the model says when it means none of these. Counting it
+    among the labels put it on the card, fed it to `analyse` as a group member,
+    and would have let `--never-answer "__OTHER__"` validate."""
+    import subprocess, sys as _sys
+    rng = np.random.default_rng(0)
+    classes = np.array(["Sedum acre", "Sedum album", "Bellis annua", build.OTHER])
+    lab = np.repeat(classes[:3], 12)
+    proba = rng.random((len(lab), 4))
+    f = tmp_path / "s.npz"
+    np.savez(f, proba=proba / proba.sum(1, keepdims=True), classes=classes,
+             label=lab, group=np.array([l.split()[0] for l in lab]),
+             cluster=np.array([f"c{i // 2}" for i in range(len(lab))]))
+    r = subprocess.run([_sys.executable, "-m", "narrowcast.cli", "audit",
+                        "--scores", str(f), "--out", str(tmp_path / "b")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "3 labels" in r.stderr, r.stderr
+    man = json.loads((tmp_path / "b" / "manifest.json").read_text())
+    assert build.OTHER not in man["labels"]
