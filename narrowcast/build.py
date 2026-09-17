@@ -101,10 +101,20 @@ MIN_SPACE_CHECK_DIM = 64
 
 
 def space_coherence(X, centroid) -> float:
-    """Mean cosine of L2-normalised rows to a reference direction."""
+    """Mean cosine between rows and a reference direction.
+
+    **Both sides are normalised here.** Normalising only the reference makes this
+    a mean *projection* rather than a mean cosine, unbounded above 1 -- which is
+    what it silently returned when `predict` handed it raw descriptors, since
+    `Bundle.predict` normalises inside `proba` and not before. The audit path was
+    unaffected (`_vecs` normalises first), so the bug was reachable from exactly
+    one of the two callers.
+    """
     c = np.asarray(centroid, dtype="float64").reshape(1, -1)
     c = c / np.clip(np.linalg.norm(c), 1e-12, None)
-    return float((np.asarray(X, dtype="float64") @ c.T).mean())
+    X = np.asarray(X, dtype="float64")
+    X = X / np.clip(np.linalg.norm(X, axis=1, keepdims=True), 1e-12, None)
+    return float((X @ c.T).mean())
 
 
 def check_same_space(fg, bg, what="the background pool"):
@@ -928,7 +938,13 @@ def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
     # bundle -- which is honest: we measured someone else's model, we did not
     # obtain a copy of it. The manifest records the absence so `predict` can say
     # so rather than failing on a missing file.
-    if clf is not None:
+    if clf is None:
+        # An audit bundle has no head, so there is nothing for a space
+        # fingerprint to describe. Dropped here rather than trusted to the caller,
+        # because `ds.X_train` is empty on the `--scores` path and `.mean(0)` on
+        # it yields NaN with a warning instead of failing.
+        space = None
+    else:
         # float32 deliberately: `_vecs` casts descriptors to float32 and sklearn
         # keeps the dtype, so this is already what the fit produced. Written
         # explicitly so that a later change upstream cannot silently double every

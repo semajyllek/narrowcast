@@ -67,6 +67,8 @@ class Bundle:
         # caller: the contract is that a prediction and the card cannot disagree,
         # and the card was written from a measurement that applied these.
         self.never_answer = set(self.manifest.get("never_answer") or [])
+        # Filled by `predict`, which is the first point at which vectors exist.
+        self.space_warning: list[str] = []
 
         # The reject class is a fitted label but never an answer: the user did not
         # ask about it, and `__OTHER__` winning the argmax is a decline in every

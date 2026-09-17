@@ -1,4 +1,5 @@
 import json
+import pathlib
 from pathlib import Path
 
 import numpy as np
@@ -1842,3 +1843,49 @@ def test_only_an_out_of_list_row_can_be_regional(tmp_path):
     ds = build.load_scored(sources.from_scores(f))
     assert ds.counts["in_catalog"] == 8
     assert ds.counts["regional_ood"] == 8
+
+
+def test_space_coherence_is_a_cosine_and_cannot_exceed_one():
+    """It normalised only the reference, making it a mean *projection*: on raw
+    descriptors it returned 5.4, the comparison against the bound was meaningless,
+    and the warning never fired on the one path that passes raw vectors."""
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(50, 128)) * 40.0        # nowhere near unit norm
+    assert abs(build.space_coherence(X, X.mean(0))) <= 1.0
+    scaled = build.space_coherence(X * 7.0, X.mean(0))
+    assert scaled == pytest.approx(build.space_coherence(X, X.mean(0)))
+
+
+def test_predict_warns_on_raw_unnormalised_vectors_from_another_space(tmp_path):
+    """The path the CLI actually takes: `sources.from_embeddings` hands over raw
+    descriptors and `Bundle.predict` normalises inside `proba`, not before. The
+    earlier test passed pre-normalised vectors and so could not see this."""
+    from narrowcast import predict as P
+    labs = ["Sedum acre", "Sedum album", "Bellis annua"]
+    rows = _rows(labs * 20, [l.split()[0] for l in labs] * 20, dim=256)
+    ds = build.load_rows(rows, "enc")
+    clf = build.fit_head(ds)
+    out = build.save_bundle(tmp_path / "b", clf, labs, "enc",
+                            build.fit_and_measure(build.score_frame(clf, ds),
+                                                  p_ood=0.2),
+                            {}, ds.counts, source="t", space=ds.X_train.mean(0))
+    b = P.Bundle(out)
+    raw = np.asarray(rows.descriptor, dtype="float32") * 25.0    # unnormalised
+    b.predict(raw)
+    assert not b.space_warning, b.space_warning
+    rng = np.random.default_rng(1)
+    rot, _ = np.linalg.qr(rng.normal(size=(256, 256)))
+    b.predict(np.asarray(raw @ rot, dtype="float32"))
+    assert any("same embedding space" in n for n in b.space_warning)
+
+
+def test_an_audit_bundle_stores_no_embedding_space():
+    """`--scores` leaves `X_train` empty, and `.mean(0)` on it is NaN with a
+    warning rather than an error. The invariant is local to `save_bundle` so it
+    cannot depend on the caller remembering."""
+    import tempfile
+    d = pathlib.Path(tempfile.mkdtemp())
+    out = build.save_bundle(d / "b", None, ["a", "b"], "enc", {}, {}, {},
+                            source="t", space=np.full(8, np.nan))
+    assert not (out / "head.npz").exists()
+    assert json.loads((out / "manifest.json").read_text())["has_head"] is False

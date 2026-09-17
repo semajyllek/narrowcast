@@ -174,6 +174,11 @@ def cmd_predict(args):
         print(f"  note: {n}", file=sys.stderr)
     X, rows = PRED.embed(b, embeddings=args.embeddings)
     results = b.predict(X)
+    # Only knowable once the vectors are in hand, so it cannot live in `notes`,
+    # which is built before any arrive. Printed rather than stored: a warning
+    # nobody sees is the silence this check exists to end.
+    for n in b.space_warning:
+        print(f"  WARNING: {n}", file=sys.stderr)
     if args.json:
         out = [{**r, "path": (str(rows.path[i]) if rows.path is not None else None)}
                for i, r in enumerate(results)]
