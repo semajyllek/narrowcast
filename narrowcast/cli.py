@@ -45,6 +45,27 @@ def _hazard_arg(args, chosen) -> list[str]:
     return out
 
 
+def _encoder_name(args, rows) -> str:
+    """Which declaration of the encoder wins.
+
+    Two channels exist for one fact: `--encoder-name`, a string for the record,
+    and an optional `encoder` field inside the npz. **The file's wins**, because
+    it is the one attached to the vectors — a flag can be typed over any file,
+    and it is the vectors whose provenance matters. A disagreement is worth
+    saying out loud rather than resolving in silence; that pattern is how two
+    parts of this tool end up believing different things.
+    """
+    declared = getattr(rows, "encoder", None)
+    if not declared:
+        return args.encoder_name
+    if args.encoder_name and args.encoder_name != "unstated" \
+            and args.encoder_name != declared:
+        print(f"  note: --encoder-name {args.encoder_name!r} disagrees with the "
+              f"{declared!r} the file declares. Using the file's: it is the one "
+              "attached to these vectors.", file=sys.stderr)
+    return declared
+
+
 def cmd_audit(args):
     rows = SRC.load(embeddings=args.embeddings, scores=args.scores)
     scored = args.scores is not None
@@ -68,7 +89,7 @@ def cmd_audit(args):
         bg = (SRC.from_embeddings(args.background_embeddings)
               if args.background_embeddings else None)
         chosen = rows.labels
-        ds = B.load_rows(rows, args.encoder_name, background=bg)
+        ds = B.load_rows(rows, _encoder_name(args, rows), background=bg)
         source = args.embeddings
 
     gmap = dict(zip(rows.label.tolist(), rows.group.tolist()))
@@ -155,7 +176,7 @@ def cmd_audit(args):
                   f"({', '.join(origins[:4])}); pass --deployment-origin to "
                   "measure what that costs", file=sys.stderr)
 
-    out = B.save_bundle(Path(args.out), clf, chosen, args.encoder_name, metrics,
+    out = B.save_bundle(Path(args.out), clf, chosen, _encoder_name(args, rows), metrics,
                         comp, ds.counts, source=str(source), hazards=hazards,
                         groups=gmap, utility=utility, never_answer=never,
                         space=None if scored else ds.X_train.mean(0))

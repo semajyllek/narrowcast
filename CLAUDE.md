@@ -1,7 +1,7 @@
 # narrowcast — orientation for a new session
 
 **Audit a classifier over a narrow label set, and the truth about how it will
-fail.** Public, MIT, pip-installable, 137 tests, CI on 3.10/3.12/3.13.
+fail.** Public, MIT, pip-installable, 138 tests, CI on 3.10/3.12/3.13.
 
 Extracted from [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid), which remains
 the research record — **every number in the README traces to a findings doc

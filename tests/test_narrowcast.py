@@ -1926,3 +1926,23 @@ def test_a_declared_encoder_is_read_from_the_file(tmp_path):
     rows = sources.from_embeddings(f)
     assert rows.encoder == "bioclip2_cml4"
     assert any("declares encoder" in n for n in rows.notes)
+
+
+def test_the_files_encoder_declaration_beats_the_flag(tmp_path):
+    """Two channels for one fact. The file's wins because it is attached to the
+    vectors, and the disagreement is said out loud rather than resolved quietly."""
+    import subprocess, sys as _sys
+    rng = np.random.default_rng(0)
+    labs = np.repeat(["Sedum acre", "Sedum album"], 12)
+    f = tmp_path / "e.npz"
+    np.savez(f, descriptor=rng.normal(size=(24, 16)).astype("float32"), label=labs,
+             group=np.array(["Sedum"] * 24),
+             cluster=np.array([f"c{i // 2}" for i in range(24)]),
+             encoder="bioclip2_cml4")
+    r = subprocess.run([_sys.executable, "-m", "narrowcast.cli", "audit",
+                        "--embeddings", str(f), "--out", str(tmp_path / "b"),
+                        "--encoder-name", "bioclip2"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "disagrees with" in r.stderr
+    man = json.loads((tmp_path / "b" / "manifest.json").read_text())
+    assert man["encoder"] == "bioclip2_cml4"
