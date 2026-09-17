@@ -50,6 +50,8 @@ class Bundle:
         z = np.load(path / "head.npz", allow_pickle=True)
         self.coef, self.intercept = z["coef"], z["intercept"]
         self.classes = z["classes"].astype(str)
+        sp = z["space"] if "space" in z.files else None
+        self.space = None if sp is None or sp.size == 0 else np.asarray(sp, "float64")
 
         m = self.manifest["metrics"]
         self.t_group, self.t_label = float(m["t_group"]), float(m["t_label"])
@@ -86,6 +88,10 @@ class Bundle:
                 f"{len(self.never_answer)} label(s) suppressed at predict time and "
                 f"never answered: " + ", ".join(sorted(self.never_answer))
                 + " — the same suppression the card was measured under")
+        if self.space is None:
+            out.append(
+                "bundle carries no embedding-space fingerprint, so vectors from a "
+                "different encoder cannot be refused — rebuild to record one")
         if self.t_novel is not None and OTHER in set(self.classes.tolist()):
             out.append(
                 f"a near-OOD gate is fitted at t_novel={self.t_novel:.3f}: a row "
@@ -96,6 +102,21 @@ class Bundle:
                 "no reject class was fitted, so this model cannot decline for "
                 "being out-of-list — only for being unsure")
         return out
+
+    def space_notes(self, X) -> list:
+        """Refuse vectors that cannot have come from the encoder this was fitted on.
+
+        `self.encoder` is a string the caller declared and catches nothing -- a
+        Core ML export and its torch original carry the same model name and live
+        in unrelated spaces. The stored direction catches it, and the failure it
+        prevents is silent rather than loud.
+        """
+        from narrowcast.build import check_same_space
+        if self.space is None:
+            return []
+        return check_same_space(self.space.reshape(1, -1),
+                                np.asarray(X, dtype="float64"),
+                                what="these vectors")
 
     def proba(self, X):
         """Softmax over the fitted head. Binary heads store one row of coefficients."""
@@ -117,6 +138,7 @@ class Bundle:
         (`max_c P(c) <= max_g sum P(c)`), which is what makes two independent
         thresholds a well-ordered three-way decision rather than two guesses.
         """
+        self.space_warning = self.space_notes(X)
         full = self.proba(X)
         cata = full[:, self.mask]
         # Same arithmetic as `build.frame_from_posteriors`, which is the only

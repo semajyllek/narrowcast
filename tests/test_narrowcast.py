@@ -685,7 +685,7 @@ def _built(tmp_path, labels_, groups_, n=12):
     gmap = dict(zip(labels_, groups_))
     out = build.save_bundle(tmp_path / "b", clf, labels_, "mobileclip2_s2", m,
                             labels.analyse(labels_, pool=labels_), ds.counts,
-                            source="test", groups=gmap)
+                            source="test", groups=gmap, space=ds.X_train.mean(0))
     return out, ds, frame, m
 
 
@@ -1746,3 +1746,99 @@ def test_the_gates_declines_are_not_charged_to_the_suppression():
     assert both["suppression"]["answers_removed"] >= 0
     assert both["suppression"]["answers_removed"] <= int(
         (f["pred_label"] == labs[0]).sum())
+
+
+# ---- Phase 3 leftovers: regional bucket, encoder binding, head dtype ---------
+
+def test_the_head_is_float32_on_disk(tmp_path):
+    """`_vecs` casts descriptors to float32 and sklearn keeps the dtype, so this
+    is already what the fit produces — pinned so an upstream change cannot
+    silently double every head on disk."""
+    out, ds, _, _ = _built(tmp_path, ["Sedum acre", "Sedum album"], ["Sedum"] * 2)
+    z = np.load(out / "head.npz")
+    assert z["coef"].dtype == np.float32 and z["intercept"].dtype == np.float32
+
+
+def test_two_pools_from_different_encoders_are_flagged_not_silently_measured():
+    """The failure this exists for was silent and cost three points: negatives
+    living in an unrelated space are trivially rejected, so label share came out
+    flattered and the number went into a table. The declared `encoder` string
+    cannot catch it — both pools carry the same model name.
+
+    A warning rather than a refusal, because the premise (embeddings from one
+    encoder share a common cone) is not validated here — nothing in the package
+    can load an encoder to check it against."""
+    rng = np.random.default_rng(0)
+    d = 256
+    base = rng.normal(size=(8, d))
+    def pool(n, rot=None):
+        X = np.vstack([base[i % 8] + rng.normal(scale=0.6, size=d) for i in range(n)])
+        if rot is not None:
+            X = X @ rot
+        return (X / np.linalg.norm(X, axis=1, keepdims=True)).astype("float32")
+    fg = pool(200)
+    other, _ = np.linalg.qr(rng.normal(size=(d, d)))
+    assert build.check_same_space(fg, pool(120, other)), "rotation not flagged"
+    # a shared cone is what makes the test discriminate; without one it cannot,
+    # and the docstring says so rather than the code pretending otherwise
+    cone = rng.normal(size=d)
+    same = np.vstack([pool(120) + 3 * cone, ])
+    assert not build.check_same_space(np.vstack([fg + 3 * cone]), same)
+
+
+def test_a_different_dimension_is_refused_because_that_one_is_certain():
+    """The asymmetry: different widths are proof and are refused; orthogonal
+    geometry rests on an unvalidated premise and only warns."""
+    rng = np.random.default_rng(0)
+    with pytest.raises(SystemExit, match="cannot be from one encoder"):
+        build.check_same_space(rng.normal(size=(20, 64)), rng.normal(size=(20, 128)))
+
+
+def test_predict_flags_vectors_from_another_space(tmp_path):
+    """Fourth seam again: the bundle stores the direction its training vectors
+    pointed in, so `predict` can make the same refusal `audit` makes."""
+    from narrowcast import predict as P
+    labs = ["Sedum acre", "Sedum album", "Bellis annua"]
+    rows = _rows(labs * 20, [l.split()[0] for l in labs] * 20, dim=256)
+    ds = build.load_rows(rows, "enc")
+    clf = build.fit_head(ds)
+    out = build.save_bundle(tmp_path / "b", clf, labs, "enc",
+                            build.fit_and_measure(build.score_frame(clf, ds),
+                                                  p_ood=0.2),
+                            {}, ds.counts, source="t", space=ds.X_train.mean(0))
+    b = P.Bundle(out)
+    assert b.space is not None
+    b.predict(ds.X_eval)
+    assert not b.space_warning, b.space_warning
+    rng = np.random.default_rng(1)
+    rot, _ = np.linalg.qr(rng.normal(size=(256, 256)))
+    b.predict(np.asarray(ds.X_eval @ rot, dtype="float32"))
+    assert any("same embedding space" in n for n in b.space_warning)
+
+
+def test_a_flagged_regional_row_moves_the_mix_to_the_deployment_realistic_one():
+    """narrowcast cannot derive geography and will not guess. When the caller says
+    which negatives a user could actually supply, the operating point anchors to
+    those — and the unrelated rows stay in the report carrying no weight."""
+    f = _e2e_frame()
+    f.loc[f["bucket"] == "near_ood", "bucket"] = "regional_ood"
+    m = build.fit_and_measure(f, p_ood=0.2)
+    assert "regional_ood" in m["ood_mix"]
+    assert "regional_ood" in m["per_bucket"]
+
+
+def test_only_an_out_of_list_row_can_be_regional(tmp_path):
+    """Promoting an in-list row would put it in a bucket where no correct answer
+    exists, and it would then count against the model for being recognised."""
+    rng = np.random.default_rng(0)
+    classes = np.array(["Sedum acre", "Sedum album"])
+    lab = np.array(["Sedum acre"] * 8 + ["Bellis annua"] * 8)
+    proba = rng.random((16, 2))
+    f = tmp_path / "r.npz"
+    np.savez(f, proba=proba / proba.sum(1, keepdims=True), classes=classes,
+             label=lab, group=np.array([l.split()[0] for l in lab]),
+             cluster=np.array([f"c{i // 2}" for i in range(16)]),
+             regional=np.ones(16, bool))           # flags everything, in-list too
+    ds = build.load_scored(sources.from_scores(f))
+    assert ds.counts["in_catalog"] == 8
+    assert ds.counts["regional_ood"] == 8

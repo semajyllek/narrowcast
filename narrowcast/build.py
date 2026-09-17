@@ -51,6 +51,13 @@ OTHER = "__OTHER__"
 BG_TRAIN_FRAC = 0.6
 BG_ORIGIN = "__BACKGROUND__"
 OOD_MIX = {"near_ood": 0.32, "distant_ood": 0.68}
+# The deployment-realistic mix, used when the caller flags which of their
+# out-of-list rows a user could plausibly supply. `distant_ood` drawn at random
+# is dominated by inputs the deployment never sees and makes rejection look
+# easier than it is; `regional_ood` is the same rule restricted to what actually
+# turns up. Rows left in `distant_ood` then carry weight zero -- they are
+# reported, but they are not evidence about the operating point.
+OOD_MIX_REGIONAL = {"near_ood": 0.32, "regional_ood": 0.68}
 BUNDLE_VERSION = 2
 
 
@@ -77,6 +84,75 @@ class Dataset:
 
 def _l2(X):
     return X / np.clip(np.linalg.norm(X, axis=1, keepdims=True), 1e-12, None)
+
+
+# Two embedding spaces from different encoders are, to a very good approximation,
+# independent random rotations of each other: a cosine between vectors drawn from
+# them concentrates at 0 with spread ~1/sqrt(D). Vectors from the *same* encoder
+# share a common cone and sit well above that, whatever their subject matter. So
+# `4 / sqrt(D)` separates "same space" from "unrelated space" at p < 1e-4, and it
+# is a statistical bound rather than a tuned constant.
+ORTHOGONAL_Z = 4.0
+# Below this the bound is too wide to separate anything -- at D = 16 it is already
+# 1.0, and a cosine cannot exceed that -- so the test has no power and is skipped
+# rather than being applied where it cannot discriminate. Real encoders are
+# 256-1024 dimensional; this only excludes toy vectors.
+MIN_SPACE_CHECK_DIM = 64
+
+
+def space_coherence(X, centroid) -> float:
+    """Mean cosine of L2-normalised rows to a reference direction."""
+    c = np.asarray(centroid, dtype="float64").reshape(1, -1)
+    c = c / np.clip(np.linalg.norm(c), 1e-12, None)
+    return float((np.asarray(X, dtype="float64") @ c.T).mean())
+
+
+def check_same_space(fg, bg, what="the background pool"):
+    """Two vector pools that cannot have come from one encoder.
+
+    The failure this exists for was silent and cost three points: a bundle
+    embedded with a Core ML export was measured against a background pool embedded
+    with the torch original, and the negatives -- living in an unrelated space --
+    were trivially rejected, so label share came out flattered. Nothing errored,
+    and the number went into a table. `manifest["encoder"]` cannot catch it: it is
+    a string the caller declares, and both pools carry the same model name.
+
+    **A dimension mismatch is refused. Orthogonal geometry is only warned about**,
+    and the asymmetry is deliberate. Different widths are proof. The geometry test
+    rests on a premise -- that embeddings from one encoder share a common cone, so
+    a cross-pool cosine near zero means two encoders -- which holds for every real
+    contrastive encoder the authors have seen and is **not validated here**, since
+    nothing in this package can load one. On synthetic vectors with independently
+    drawn class centroids it false-positives, because such vectors share no cone
+    to begin with. Refusing on an untested premise would be the mistake this
+    project has already recorded twice: a partial measurement read as a verdict.
+
+    So: returns a list of notes, and raises only on the certain case. A domain
+    repo that *does* have encoders should measure the false-positive rate on real
+    pairs; until then this stays a warning.
+    """
+    if fg is None or bg is None or len(fg) == 0 or len(bg) == 0:
+        return []
+    if fg.shape[1] != bg.shape[1]:
+        raise SystemExit(
+            f"{what} has {bg.shape[1]}-dimensional vectors and your rows have "
+            f"{fg.shape[1]}. These cannot be from one encoder.")
+    d = fg.shape[1]
+    if d < MIN_SPACE_CHECK_DIM:
+        return []
+    bound = ORTHOGONAL_Z / np.sqrt(d)
+    within = min(space_coherence(fg, fg.mean(0)), space_coherence(bg, bg.mean(0)))
+    cross = space_coherence(bg, fg.mean(0))
+    if abs(cross) < bound <= within:
+        return [f"{what} may not live in the same embedding space as your rows: "
+                f"mean cosine across the two pools is {cross:+.4f}, "
+                f"indistinguishable from unrelated (|cos| < {bound:.4f} at "
+                f"D={d}), while within each pool it is {within:.4f}. Two "
+                f"encoders, or one encoder and an export of it, would look like "
+                f"this -- and so would genuinely unrelated subject matter. Worth "
+                f"checking: negatives in an unrelated space are trivially "
+                f"rejected and label share comes out flattered, which is silent."]
+    return []
 
 
 def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dataset:
@@ -118,6 +194,7 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
 
     if background is not None:
         B = _vecs(background)
+        notes += check_same_space(X, B)
         cut = rng.permutation(len(B))
         n = int(BG_TRAIN_FRAC * len(B))
         Xtr.append(B[cut[:n]]); ytr.append(np.full(n, OTHER))
@@ -191,10 +268,16 @@ def load_scored(rows, seed: int = 0) -> Dataset:
     bucket = np.where(
         in_list, "in_catalog",
         np.where(np.isin(group, sorted(listed_groups)), "near_ood", "distant_ood"))
+    if rows.regional is not None:
+        # Only an out-of-list row can be regional: an in-list row is not a
+        # rejection case at all, and promoting one would put it in a bucket where
+        # no correct answer exists.
+        bucket = np.where(np.asarray(rows.regional, bool) & (bucket == "distant_ood"),
+                          "regional_ood", bucket)
 
     truth = np.where(in_list, label, OTHER)
     counts = {b: int((bucket == b).sum())
-              for b in ("in_catalog", "near_ood", "distant_ood")}
+              for b in ("in_catalog", "near_ood", "distant_ood", "regional_ood")}
     counts["train"] = 0
     # The caller's model was trained on something we were not shown, so the
     # rows-per-label warning has no denominator here. Saying nothing is correct;
@@ -613,8 +696,13 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     # out-of-list rate". Restricting the mix to the buckets actually present, per
     # side, makes the stated prevalence the real one.
     def _mix(sub):
-        present = {b: s for b, s in OOD_MIX.items() if (sub["bucket"] == b).any()}
-        return present or OOD_MIX
+        # The regional mix wherever the caller flagged regional rows, because it
+        # is the deployment-realistic one and the whole point of the flag is that
+        # `distant_ood` overstates how easy rejection is.
+        base = (OOD_MIX_REGIONAL if (sub["bucket"] == "regional_ood").any()
+                else OOD_MIX)
+        present = {b: s for b, s in base.items() if (sub["bucket"] == b).any()}
+        return present or base
 
     w_cal = deployment_weights(cal["bucket"].to_numpy(), p_ood=p_ood, ood_mix=_mix(cal))
     (tg, ts), _ = fit_thresholds(
@@ -699,7 +787,7 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     inc = te["in_catalog"].to_numpy()
 
     per_bucket = {}
-    for b in ("in_catalog", "near_ood", "distant_ood"):
+    for b in ("in_catalog", "near_ood", "distant_ood", "regional_ood"):
         bm = te["bucket"].to_numpy() == b
         if bm.any():
             per_bucket[b] = {
@@ -792,6 +880,7 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
 
     return {
         "t_group": float(tg), "t_label": float(ts), "p_ood": p_ood,
+        "ood_mix": _mix(te),
         "t_novel": None if tn is None else float(tn),
         "novelty_gate": gate_report,
         "suppression": suppression,
@@ -819,7 +908,7 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
 
 def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
                 source: str, hazards=None, groups=None, utility=None,
-                never_answer=None) -> Path:
+                never_answer=None, space=None) -> Path:
     """Head weights, thresholds, and everything needed to reproduce the claim.
 
     `groups` is the label -> group map, and storing it is what makes `predict`
@@ -840,9 +929,19 @@ def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
     # obtain a copy of it. The manifest records the absence so `predict` can say
     # so rather than failing on a missing file.
     if clf is not None:
-        np.savez_compressed(out / "head.npz", coef=clf.coef_,
-                            intercept=clf.intercept_,
-                            classes=np.asarray(clf.classes_, dtype=str))
+        # float32 deliberately: `_vecs` casts descriptors to float32 and sklearn
+        # keeps the dtype, so this is already what the fit produced. Written
+        # explicitly so that a later change upstream cannot silently double every
+        # head on disk, and pinned by a test.
+        np.savez_compressed(out / "head.npz",
+                            coef=np.asarray(clf.coef_, dtype="float32"),
+                            intercept=np.asarray(clf.intercept_, dtype="float32"),
+                            classes=np.asarray(clf.classes_, dtype=str),
+                            # The direction the training vectors point in. Lets
+                            # `predict` refuse vectors from a different encoder,
+                            # which the declared `encoder` string cannot catch.
+                            space=np.zeros(0, dtype="float32") if space is None
+                            else np.asarray(space, dtype="float32").ravel())
     manifest = {
         "bundle_version": BUNDLE_VERSION,
         "has_head": clf is not None,
@@ -863,7 +962,7 @@ def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
         # that must be legible after the fact, since they are what makes the
         # thresholds reproducible rather than tuned.
         "utility": {**UTILITY, **(utility or {})},
-        "ood_mix": OOD_MIX,
+        "ood_mix": (metrics or {}).get("ood_mix") or OOD_MIX,
         "groups": {str(k): str(v) for k, v in (groups or {}).items()},
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))

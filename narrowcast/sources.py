@@ -53,6 +53,8 @@ class Rows:
     notes: list[str] = field(default_factory=list)
     proba: np.ndarray | None = None     # set by `from_scores` only
     classes: np.ndarray | None = None   # column order of `proba`
+    # Which out-of-list rows are deployment-plausible. See `from_scores`.
+    regional: np.ndarray | None = None
 
     def __len__(self):
         return len(self.label)
@@ -108,6 +110,23 @@ def _finish(label, path=None, descriptor=None, group=None, cluster=None, notes=N
                 descriptor, origin, has_clusters, notes)
 
 
+def _regional(z) -> np.ndarray | None:
+    """The caller's `regional` flag: which out-of-list rows a user could actually
+    put in front of this model.
+
+    narrowcast cannot derive this and will not guess. A background pool drawn at
+    random from everything is dominated by inputs the deployment would never see
+    — plantid's is "mosses, ferns and tropical flora a Europe/NA app would never
+    be shown" — which makes the reject decision look easier than it is. The
+    caller knows which of their negatives are plausible; this is the column that
+    says so, and without it the tool simply has no regional bucket rather than
+    inventing one.
+    """
+    if "regional" not in z.files:
+        return None
+    return np.asarray(z["regional"]).astype(bool)
+
+
 def from_embeddings(path) -> Rows:
     """Precomputed vectors: skips the encoder entirely."""
     z = np.load(Path(path), allow_pickle=True)
@@ -118,11 +137,13 @@ def from_embeddings(path) -> Rows:
         raise ValueError(f"{path} has no 'label' array; found {z.files}")
     cluster = z["cluster"] if "cluster" in z.files else (
         z["obs_id"] if "obs_id" in z.files else None)
-    return _finish(label, descriptor=z["descriptor"],
+    r = _finish(label, descriptor=z["descriptor"],
                    group=z["group"] if "group" in z.files else None,
                    cluster=cluster,
                    origin=z["origin"] if "origin" in z.files else None,
                    notes=[f"{len(z['descriptor'])} precomputed embeddings from {Path(path).name}"])
+    r.regional = _regional(z)
+    return r
 
 
 def from_scores(path) -> Rows:
@@ -176,6 +197,13 @@ def from_scores(path) -> Rows:
                 origin=z["origin"] if "origin" in z.files else None,
                 notes=notes)
     r.proba, r.classes = proba, classes
+    r.regional = _regional(z)
+    if r.regional is not None:
+        if len(r.regional) != len(label):
+            raise ValueError(f"'regional' has {len(r.regional)} entries but "
+                             f"'label' has {len(label)}; they must line up")
+        r.notes.append(f"{int(r.regional.sum())} row(s) flagged regional: "
+                       "out-of-list inputs the deployment could plausibly see")
     return r
 
 

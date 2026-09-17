@@ -157,7 +157,8 @@ def cmd_audit(args):
 
     out = B.save_bundle(Path(args.out), clf, chosen, args.encoder_name, metrics,
                         comp, ds.counts, source=str(source), hazards=hazards,
-                        groups=gmap, utility=utility, never_answer=never)
+                        groups=gmap, utility=utility, never_answer=never,
+                        space=None if scored else ds.X_train.mean(0))
     card_path = C.write(out)
     print(f"\nbundle {out}\ncard   {card_path}", file=sys.stderr)
     print(f"\n  coverage {100*metrics['coverage']:.1f}%  "

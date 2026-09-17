@@ -1,7 +1,7 @@
 # narrowcast — orientation for a new session
 
 **Audit a classifier over a narrow label set, and the truth about how it will
-fail.** Public, MIT, pip-installable, 123 tests, CI on 3.10/3.12/3.13.
+fail.** Public, MIT, pip-installable, 131 tests, CI on 3.10/3.12/3.13.
 
 Extracted from [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid), which remains
 the research record — **every number in the README traces to a findings doc
@@ -34,7 +34,7 @@ So no report ever prints coverage without the label-level share beside it.
 
 | module | does only |
 |---|---|
-| `sources.py` | embeddings / scores → `Rows`. **The tool never fetches and never encodes.** |
+| `sources.py` | embeddings / scores → `Rows`, including the caller's optional `regional` flag. **The tool never fetches and never encodes.** |
 | `cascade.py` | label/group/decline, the optional near-OOD gate, declared `UTILITY`, threshold fitting, clustered splits with declared hazards stratified into both halves, per-label `suppress`, cluster bootstrap |
 | `build.py` | head (embeddings path only), per-row scores, measurement, hazard union, bundle |
 | `card.py` | the report, the consequential-label gate, what a suppression cost, and the origin-composition section |
@@ -81,6 +81,24 @@ why. We measured someone else's model; we did not obtain a copy of it.
   `--scores` rather than reporting a silent null — it refits a head twice and
   there is no head. `--background-embeddings` is rejected under `--scores`
   instead of ignored, because the negatives are already in the file.
+- **The embedding-space check warns; it does not refuse, and it is unvalidated.**
+  `build.check_same_space` refuses two vector pools of different width, because
+  that is proof. It only *warns* when the two look mutually orthogonal, even
+  though that is the real failure — a bundle embedded with a Core ML export
+  measured against a torch-embedded background pool, which flattered label share
+  by three points in silence. The geometry test rests on the premise that one
+  encoder's embeddings share a common cone, and nothing in this package can load
+  an encoder to check that; on synthetic vectors with independently drawn
+  centroids it false-positives. Refusing on an untested premise is the mistake
+  this project has recorded twice. **A domain repo with real encoders should
+  measure the false-positive rate on real pairs** — that is what would justify
+  promoting it to a refusal.
+- **`regional_ood` is the caller's to declare and is never derived.** An optional
+  `regional` boolean column marks which out-of-list rows the deployment could
+  plausibly be shown. With it present the mix becomes `OOD_MIX_REGIONAL` and the
+  remaining `distant_ood` rows carry weight **zero** — reported, but not evidence
+  about the operating point. Without it there is no regional bucket at all, which
+  is right: narrowcast has no geography and will not guess one.
 - **Nothing here touches the network, and nothing reads a pixel.** That used to
   need saying about `fit` and `build`; now it is structural. There is no encoder
   to load, so there is no registry to resolve against, no Hub to search, and no

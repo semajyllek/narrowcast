@@ -596,7 +596,8 @@ def render(manifest: dict) -> str:
     L += ["## Where it declines and where it errs", "", "| bucket | n | answered | correct when answered |",
           "|---|---|---|---|"]
     labels = {"in_catalog": "on your list", "near_ood": "relatives you did not choose",
-              "distant_ood": "unrelated inputs"}
+              "distant_ood": "unrelated inputs",
+              "regional_ood": "unlisted, but plausible where this deploys"}
     for b, v in m.get("per_bucket", {}).items():
         L.append(f"| {labels.get(b, b)} | {v['n']} | {_pct(v['answered'])} | "
                  f"{_pct(v['correct_when_answered'])} |")
@@ -608,6 +609,16 @@ def render(manifest: dict) -> str:
     # reader has no way to know it is not one.
     # Keyed on the measurements, not on `manifest["hazards"]`: that key records
     # only the in-list declarations, and the absent ones are stratified too.
+    if "regional_ood" in (m.get("ood_mix") or {}):
+        extra = (m.get("per_bucket") or {}).get("distant_ood")
+        L += ["_You flagged which out-of-list rows this deployment could "
+              "plausibly see, so the operating point is anchored to those rather "
+              "than to unrelated inputs — the honest test of the reject decision, "
+              "since a background pool drawn at random makes rejection look "
+              "easier than it is._"
+              + (f" The {extra['n']} unrelated rows are listed above but carry "
+                 "**no weight**: they are reported, not evidence." if extra else ""),
+              ""]
     if m.get("hazard") or m.get("hazard_absent"):
         L += ["_Declared hazards are forced into both halves of the split so a "
               "single audit cannot miss one by shuffle. They are therefore "
