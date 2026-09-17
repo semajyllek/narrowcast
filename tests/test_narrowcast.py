@@ -1603,9 +1603,9 @@ def test_the_gate_has_nothing_to_add_where_the_fit_already_declines_everything()
     push stage one to decline nearly everything — a high `p_ood` with buckets the
     closed-set scores cannot separate — there is no error left for it to remove,
     and it correctly reports a gain of zero rather than adding declines."""
-    m = build.fit_and_measure(_gate_frame(), p_ood=0.3, gate=True)
-    assert m["novelty_gate"]["rows_declined"] == 0
-    assert m["novelty_gate"]["near_ood_wrong_ungated"] == 0.0
+    g = build.fit_and_measure(_gate_frame(), p_ood=0.3, gate=True)["novelty_gate"]
+    assert g["fit_turned_it_off"] is True
+    assert g["rows_declined"] == 0
 
 
 def test_the_gate_never_scores_below_the_ungated_fit():
@@ -1709,3 +1709,40 @@ def test_predict_applies_the_gate_and_says_so(tmp_path):
     assert low and high, "the threshold splits nothing; the assertions are vacuous"
     assert all(r["rank"] == build.DECLINE for r in low)
     assert any(r["rank"] != build.DECLINE for r in high)
+
+
+def test_a_gate_the_fit_turned_off_changes_no_number_on_the_card():
+    """The bug this pins: the turned-off reset used to run *after* every metric
+    had been computed from the gated decision. A `t_novel` at the bottom of the
+    calibration grid gates nothing there and can still catch a test row below that
+    minimum, so the card could report a decline rule the manifest denied and
+    `predict` would not run."""
+    f = _gate_frame()
+    for p in (0.2, 0.3, 0.4, 0.5):
+        gated = build.fit_and_measure(f, p_ood=p, gate=True)
+        if not gated["novelty_gate"]["fit_turned_it_off"]:
+            continue
+        plain = build.fit_and_measure(f, p_ood=p)
+        for k in ("coverage", "precision", "label_share", "group_share",
+                  "decline_share", "closed_set_top1", "t_group", "t_label"):
+            assert gated[k] == plain[k], f"{k} moved at p_ood={p}"
+        assert gated["per_bucket"] == plain["per_bucket"]
+        assert gated["ci"] == plain["ci"]
+        assert gated["t_novel"] is None
+
+
+def test_the_gates_declines_are_not_charged_to_the_suppression():
+    """Both flags at once. The suppression delta is measured against the decision
+    *including* the gate, or the gate's declines get billed to `--never-answer`
+    and the card prints a cost the suppression did not incur."""
+    f = _gate_frame()
+    labs = sorted(set(f.loc[f["in_catalog"], "truth"]))
+    both = build.fit_and_measure(f, p_ood=0.1, gate=True, labels=labs,
+                                 never_answer=[labs[0]])
+    only_gate = build.fit_and_measure(f, p_ood=0.1, gate=True)
+    assert both["novelty_gate"]["rows_declined"] == \
+        only_gate["novelty_gate"]["rows_declined"]
+    # every answer the suppression is charged with must name a suppressed label
+    assert both["suppression"]["answers_removed"] >= 0
+    assert both["suppression"]["answers_removed"] <= int(
+        (f["pred_label"] == labs[0]).sum())

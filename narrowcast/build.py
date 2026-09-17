@@ -627,13 +627,29 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     # `cascade.fit_novelty_threshold` for why it is staged rather than joint, and
     # for the guarantee that makes staging safe -- the sweep can always choose the
     # ungated baseline, so this cannot score below the fit above.
-    tn, gate_gain = (None, None)
-    if gate and "novelty" in cal:
-        tn, gate_gain = fit_novelty_threshold(
-            cal["label_conf"].to_numpy(), cal["group_conf"].to_numpy(),
-            cal["novelty"].to_numpy(), cal["label_ok"].to_numpy(),
-            cal["group_ok"].to_numpy(), cal["in_catalog"].to_numpy(),
-            tg, ts, weights=utility, sample_weight=w_cal)
+    # Resolved here, before any decision is taken, so that `tn` is None from the
+    # start when the fit declines the gate. Deciding it further down -- after
+    # `lv_open` had already been computed with a threshold -- left every headline
+    # number reflecting a decline rule the manifest then said did not exist: a
+    # `t_novel` at the bottom of the calibration grid gates nothing on calib and
+    # can still catch a test row below that minimum.
+    tn, gate_gain, gate_unreadable = None, None, None
+    if gate:
+        if "novelty" not in cal:
+            gate_unreadable = "no novelty column in the frame"
+        elif float(np.ptp(te["novelty"].to_numpy())) < 1e-9:
+            gate_unreadable = ("the posteriors carry no out-of-list class, so "
+                               "1 - P(__OTHER__) is 1 on every row and there is "
+                               "nothing for the gate to read")
+        else:
+            fitted_tn, gate_gain = fit_novelty_threshold(
+                cal["label_conf"].to_numpy(), cal["group_conf"].to_numpy(),
+                cal["novelty"].to_numpy(), cal["label_ok"].to_numpy(),
+                cal["group_ok"].to_numpy(), cal["in_catalog"].to_numpy(),
+                tg, ts, weights=utility, sample_weight=w_cal)
+            # Adopted only if it earned something. A gate the fit turned off is
+            # not applied, not measured against, and not written to the bundle.
+            tn = float(fitted_tn) if gate_gain > 0 else None
 
     # Headroom -- coarse-rank accuracy minus fine-rank accuracy -- governs whether
     # the cascade retreats to the group rank at all (plantid's
@@ -718,25 +734,22 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     # declines to make. If the fit turned it off, that is what gets printed.
     gate_report = None
     if gate:
-        nov_all = te["novelty"].to_numpy() if "novelty" in te else None
-        flat = nov_all is not None and float(np.ptp(nov_all)) < 1e-9
-        if tn is None or flat:
-            # No out-of-list class in the posteriors means the in-list mass share
-            # is 1 for every row, so there is no signal to threshold. This is the
-            # normal case under `--scores` unless the caller's own model has a
-            # reject class, and it is worth saying rather than reporting a
-            # threshold that read a constant.
-            gate_report = {
-                "fitted": False,
-                "reason": "the posteriors carry no out-of-list class, so "
-                          "1 - P(__OTHER__) is 1 on every row and there is "
-                          "nothing for the gate to read"
-                          if flat else "no novelty column in the frame"}
-            tn = None
+        if gate_unreadable:
+            gate_report = {"fitted": False, "reason": gate_unreadable}
+        elif tn is None:
+            gate_report = {"fitted": True, "t_novel": None,
+                           "calib_utility_gained": float(gate_gain),
+                           "fit_turned_it_off": True, "rows_declined": 0,
+                           "near_ood_wrong_ungated": None,
+                           "near_ood_wrong_gated": None,
+                           "label_share_ungated": None}
         else:
+            # `lv_open` is the gated decision; `ungated` is what it would have been
+            # without. Both are needed and neither may be derived from the other.
             ungated = decide(te["label_conf"].to_numpy(),
                              te["group_conf"].to_numpy(), tg, ts)
             nm = te["bucket"].to_numpy() == "near_ood"
+
             def _wrong(levels, m):
                 if not m.any():
                     return None
@@ -744,28 +757,23 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
                 ok = ((levels[m] == LABEL) & te["label_ok"].to_numpy()[m]) | \
                      ((levels[m] == GROUP) & te["group_ok"].to_numpy()[m])
                 return float((ans & ~ok).mean())
+
             gate_report = {
                 "fitted": True,
                 "t_novel": float(tn),
                 "calib_utility_gained": float(gate_gain),
-                # The fit was free to choose a threshold that gates nothing, and
-                # did. Reported as the result it is: at these declared payoffs the
-                # gate does not pay, which is what plantid found at `wrong = -4`.
-                "fit_turned_it_off": bool(gate_gain <= 0.0),
+                "fit_turned_it_off": False,
                 "rows_declined": int(((ungated != DECLINE) & (lv_open == DECLINE)).sum()),
                 "near_ood_wrong_ungated": _wrong(ungated, nm),
                 "near_ood_wrong_gated": _wrong(lv_open, nm),
                 "label_share_ungated": float((ungated[inc] == LABEL).mean())
                 if inc.any() else None,
+                # The gate's own effect on label share, not the headline: with
+                # `--never-answer` also in play the headline carries both costs
+                # and attributing all of it here would overstate the gate's price.
+                "label_share_gated": float((lv_open[inc] == LABEL).mean())
+                if inc.any() else None,
             }
-            if gate_report["fit_turned_it_off"]:
-                # The bundle carries no gate at all rather than one fitted to the
-                # bottom of the grid. A threshold that gates nothing on the
-                # calibration half can still gate a test row that fell below its
-                # minimum, and `predict` would then apply a decline rule the fit
-                # had explicitly declined to adopt.
-                tn = None
-                lv_open = ungated
 
     suppression = None
     if never_answer:

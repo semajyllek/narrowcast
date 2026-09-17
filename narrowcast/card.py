@@ -146,11 +146,17 @@ def _gate_section(g: dict | None) -> list:
     if ung is not None and gat is not None:
         L += [f"On the relatives you did not choose — the bucket this exists for — "
               f"the wrong-answer rate goes **{_pct(ung)} → {_pct(gat)}**.", ""]
-    if g["label_share_ungated"] is not None:
-        L += [f"It is paid for out of the label-level share, which goes from "
-              f"{_pct(g['label_share_ungated'])} to the figure at the top of this "
-              f"card. If those two are equal, the gate removed only rows that "
-              f"were going to be wrong.", ""]
+    if g.get("label_share_ungated") is not None:
+        before, after = g["label_share_ungated"], g.get("label_share_gated")
+        if after is None or after == before:
+            L += [f"The in-list label-level share does not move: it stays at "
+                  f"{_pct(before)}, so the gate removed only rows that were going "
+                  f"to be wrong.", ""]
+        else:
+            L += [f"It is paid for out of the label-level share, which the gate "
+                  f"alone takes from {_pct(before)} to {_pct(after)}. The figure "
+                  f"at the top of this card may be lower still, because anything "
+                  f"you suppressed is charged there too.", ""]
     L += ["The gate **declines** rather than retreating to the group rank. "
           "plantid preferred retreating, because there an unlisted congener "
           "answered at its own genus counted as correct; here no out-of-list row "
