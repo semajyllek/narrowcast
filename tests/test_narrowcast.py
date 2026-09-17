@@ -1335,3 +1335,132 @@ def test_a_declared_hazard_is_measured_end_to_end_at_every_seed():
                                   hazards_absent=["Conium sp1"])
         assert m["hazard_absent"]["Conium sp1"]["unmeasured"] is False, seed
         assert m["hazard_absent"]["Conium sp1"]["n"] > 0
+
+
+# ---- per-label cost: labels the model will never answer ----------------------
+
+def test_suppression_declines_the_label_and_spares_an_informative_group():
+    """The look-alike, not the hazard. And "it is an umbellifer" is a warning the
+    forager wanted, so a group answer survives while the label answer does not."""
+    lv = np.array([build.LABEL, build.GROUP, build.LABEL], dtype=object)
+    pred = np.array(["Daucus carota", "Daucus carota", "Osmorhiza berteroi"])
+    pgen = np.array(["Apiaceae", "Apiaceae", "Apiaceae"])
+    members = {"Apiaceae": {"Daucus carota", "Osmorhiza berteroi"}}
+    out = cascade.suppress(lv, pred, {"Daucus carota"}, pgen, members)
+    assert list(out) == [build.DECLINE, build.GROUP, build.LABEL]
+
+
+def test_a_group_holding_only_suppressed_labels_is_suppressed_too():
+    """Grouped by genus with one listed Daucus, "it is a *Daucus*" is the
+    suppressed claim under another name. Grouped by family it is not."""
+    lv = np.array([build.GROUP], dtype=object)
+    args = (np.array(["Daucus carota"]), {"Daucus carota"}, np.array(["Daucus"]))
+    assert list(cascade.suppress(lv, *args, {"Daucus": {"Daucus carota"}})) \
+        == [build.DECLINE]
+    assert list(cascade.suppress(lv, *args,
+                                 {"Daucus": {"Daucus carota", "Daucus pusillus"}})) \
+        == [build.GROUP]
+
+
+def test_suppression_without_a_group_map_still_suppresses_labels():
+    lv = np.array([build.LABEL, build.GROUP], dtype=object)
+    out = cascade.suppress(lv, np.array(["a", "a"]), {"a"})
+    assert list(out) == [build.DECLINE, build.GROUP]
+
+
+def test_no_suppression_is_the_identity():
+    lv = np.array([build.LABEL, build.GROUP, build.DECLINE], dtype=object)
+    assert list(cascade.suppress(lv, np.array(["a", "b", "c"]), None)) == list(lv)
+    assert list(cascade.suppress(lv, np.array(["a", "b", "c"]), set())) == list(lv)
+
+
+def test_the_threshold_fit_does_not_see_the_suppression():
+    """Keeping the override out of `fit_thresholds` is what makes its cost a
+    measurable delta instead of something the operating point absorbs. If someone
+    folds it into the fit, the thresholds move and this fails."""
+    df = _e2e_frame()
+    plain = build.fit_and_measure(df, p_ood=0.2)
+    sup = build.fit_and_measure(df, p_ood=0.2, never_answer=["G0 sp0"],
+                                labels=sorted(set(df.loc[df["in_catalog"], "label"])))
+    assert sup["t_label"] == plain["t_label"]
+    assert sup["t_group"] == plain["t_group"]
+
+
+def test_the_card_prints_what_the_suppression_cost():
+    """A per-label safety dial whose price is not stated is the kind of number
+    this tool exists to refuse."""
+    df = _e2e_frame()
+    labels = sorted(set(df.loc[df["in_catalog"], "label"]))
+    m = build.fit_and_measure(df, p_ood=0.2, never_answer=["G0 sp0"], labels=labels)
+    s = m["suppression"]
+    assert s["labels"] == ["G0 sp0"]
+    assert s["label_share_with"] <= s["label_share_without"]
+    assert s["answers_removed"] > 0
+    man = _manifest(0.85)
+    man["metrics"]["suppression"] = s
+    txt = card.render(man)
+    assert "never answer" in txt.lower()
+    assert "G0 sp0" in txt
+
+
+def test_the_card_points_at_the_lookalike_not_the_consequential_label():
+    """It used to advise treating the consequential labels as always-decline,
+    which is inert: the rate counts rows named as something *else*, so those rows
+    were never in the numerator. Shipping `--never-answer` beside that advice
+    would send the reader to do the thing that does not work."""
+    from narrowcast.card import _hazard_section
+    txt = "\n".join(_hazard_section({"Conium maculatum": {
+        "n": 40, "declined": 0.1, "named_correctly": 0.5,
+        "named_other_hazard": 0.0, "named_non_hazard": 0.4,
+        "named_as": {"Daucus carota": 12, "Osmorhiza berteroi": 4},
+        "ci": None, "unmeasured": False}}))
+    assert '--never-answer "Daucus carota"' in txt
+    assert "Suppressing the consequential label itself does nothing" in txt
+
+
+def test_the_in_list_path_records_what_the_hazard_was_named():
+    """Without `named_as` the card can say the gate failed but not which label to
+    suppress, which makes the remedy unusable on the oldest path."""
+    truth = ["Conium maculatum"] * 4
+    pred = ["Daucus carota", "Daucus carota", "Foeniculum vulgare", "Conium maculatum"]
+    te = _haz_frame(pred, [p.split()[0] for p in pred], truth)
+    h = build.hazard_metrics(te, np.array([build.LABEL] * 4),
+                             {"Conium maculatum"})["Conium maculatum"]
+    assert h["named_as"] == {"Daucus carota": 2, "Foeniculum vulgare": 1}
+
+
+def test_a_bundle_predicts_under_the_suppression_the_card_was_measured_with(tmp_path):
+    """The contract is that a prediction and the card cannot disagree. A manifest
+    field written but never read would pass every other test here."""
+    from narrowcast import predict as P
+    labels = [f"G{i // 3} sp{i}" for i in range(6)]
+    rows = _rows(labels * 8, [l.split()[0] for l in labels] * 8, dim=16)
+    ds = build.load_rows(rows, "test-encoder")
+    clf = build.fit_head(ds)
+    frame = build.score_frame(clf, ds)
+    victim = sorted(rows.labels)[0]
+    metrics = build.fit_and_measure(frame, p_ood=0.1, never_answer=[victim],
+                                    labels=rows.labels)
+    out = build.save_bundle(tmp_path / "b", clf, rows.labels, "test-encoder",
+                            metrics, {}, ds.counts, source="t",
+                            never_answer=[victim])
+    b = P.Bundle(out)
+    assert b.never_answer == {victim}
+    X = np.asarray(rows.descriptor, dtype="float32")
+    res = b.predict(X)
+    assert not any(r["answer"] == victim for r in res)
+    assert all(r["rank"] != build.LABEL
+               for r in res if r["label"] == victim)
+    assert any("suppressed at predict time" in n for n in b.notes)
+
+
+def test_cli_refuses_to_suppress_a_label_that_is_not_on_the_list():
+    """You can only suppress what the model can emit. The sibling flags refuse
+    their own wrong side too — a flag that silently does nothing is worse than one
+    that will not start."""
+    import subprocess, sys as _sys
+    r = subprocess.run([_sys.executable, "-m", "narrowcast.cli", "audit",
+                        "--scores", "/nonexistent.npz", "--out", "/tmp/x",
+                        "--never-answer", "Conium maculatum"],
+                       capture_output=True, text=True)
+    assert r.returncode != 0

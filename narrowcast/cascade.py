@@ -91,6 +91,58 @@ def decide(label_conf, group_conf, t_group, t_label):
     return out
 
 
+def suppress(levels, pred_label, never, pred_group=None, group_members=None):
+    """Force DECLINE wherever the cascade would answer with a suppressed label.
+
+    `UTILITY["wrong"]` is one scalar over every label, so a profile can make the
+    whole model cautious and cannot make it cautious about one thing. This is the
+    per-label dial: a list of labels the bundle will never emit.
+
+    **It suppresses the look-alike, not the hazard.** On a forager's list the
+    dangerous plant is out-of-list and the harm is it being named *Daucus carota*,
+    so `--never-answer "Daucus carota"` is what removes the harm. Suppressing the
+    hazard itself is not merely weaker, it is inert: `build.hazard_metrics` counts
+    rows where the prediction is *not* the hazard, so rows whose argmax is the
+    hazard were never in the numerator. Suppressing it moves those rows from LABEL
+    to DECLINE, leaves numerator and denominator alone, and drops
+    `named_correctly` to zero -- the same danger for less utility.
+
+    **After `decide`, never inside it, and never inside the fit.** `decide` takes
+    confidences alone, and threading the predicted label through it would pull
+    this into `fit_thresholds`'s grid search. The thresholds are fitted as though
+    no label were suppressed, and suppression is applied to the result, so what
+    the override costs stays a clean measurable delta instead of being absorbed
+    into the operating point. Folding it into the fit would delete that number.
+
+    **Decline, not retreat to the group.** A group answer looks like the softer
+    option and is conditionally wrong: "it is an umbellifer" genuinely warns the
+    person holding the root, "it is a *Lomatium*" is a species-level claim wearing
+    the clothes of caution, and which one you get depends on how the caller
+    grouped. Declining is safe under every grouping.
+
+    **A group answer is suppressed only when the group has nothing else in it.**
+    Suppressing on the argmax alone would kill "it is an umbellifer" on any row
+    that happened to lean towards *Daucus carota*, which is a warning the forager
+    wanted. But where the caller grouped by genus and *Daucus carota* is the only
+    listed *Daucus*, "it is a *Daucus*" is the suppressed claim with a different
+    name on it, so that one goes too. `group_members` is the label set per group;
+    without it only label answers are suppressed, and the genus-grouped hole
+    stays open.
+    """
+    if not never:
+        return levels
+    never = set(never)
+    out = np.asarray(levels, dtype=object).copy()
+    kill = (out == LABEL) & np.isin(np.asarray(pred_label, dtype=str), sorted(never))
+    if pred_group is not None and group_members:
+        hollow = sorted(g for g, members in group_members.items()
+                        if members and set(members) <= never)
+        if hollow:
+            kill |= (out == GROUP) & np.isin(np.asarray(pred_group, dtype=str), hollow)
+    out[kill] = DECLINE
+    return out
+
+
 def utility(levels, label_ok, group_ok, in_catalog, weights=None):
     """Per-observation utility of the decision taken. Vectorised: threshold
     fitting evaluates this tens of thousands of times."""

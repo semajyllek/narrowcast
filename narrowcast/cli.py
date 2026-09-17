@@ -104,9 +104,32 @@ def cmd_audit(args):
                 "these --hazard-absent labels ARE on the list: "
                 + ", ".join(present)
                 + "\nUse --hazard for those; the two measure opposite things.")
+    # You can only suppress what the model can emit, so unlike `--hazard-absent`
+    # this one must name a label that IS on the list. Refusing is the convention:
+    # a flag silently doing nothing is worse than a flag that will not start.
+    never = list(args.never_answer or [])
+    if never:
+        unknown = [n for n in never if n not in set(chosen)]
+        if unknown:
+            raise SystemExit(
+                "these --never-answer labels are not in the label set: "
+                + ", ".join(sorted(unknown))
+                + "\nYou can only suppress a label the model can emit. To name "
+                  "an unlisted dangerous species, use --hazard-absent; to stop "
+                  "this model answering with the harmless label that species "
+                  "gets confused for, pass that label here.")
+        if set(never) >= set(chosen):
+            raise SystemExit(
+                "--never-answer suppresses every label on the list, which leaves "
+                "a model that can only decline. Nothing to measure.")
+        print(f"  note: {len(never)} label(s) suppressed -- never answered, "
+              "declined instead. Thresholds are fitted without the suppression "
+              "and it is applied after, so the card reports what it cost.",
+              file=sys.stderr)
     metrics = B.fit_and_measure(frame, p_ood=args.ood_rate, hazards=hazards,
                                 groups=gmap, utility=utility,
-                                hazards_absent=absent)
+                                hazards_absent=absent, never_answer=never,
+                                labels=chosen)
 
     if args.deployment_origin:
         if scored:
@@ -128,7 +151,7 @@ def cmd_audit(args):
 
     out = B.save_bundle(Path(args.out), clf, chosen, args.encoder_name, metrics,
                         comp, ds.counts, source=str(source), hazards=hazards,
-                        groups=gmap, utility=utility)
+                        groups=gmap, utility=utility, never_answer=never)
     card_path = C.write(out)
     print(f"\nbundle {out}\ncard   {card_path}", file=sys.stderr)
     print(f"\n  coverage {100*metrics['coverage']:.1f}%  "
@@ -208,6 +231,18 @@ def main(argv=None):
                               "poison hemlock among things they mean to eat, so "
                               "--hazard refuses it and the risk goes unmeasured. "
                               "Needs rows for it in the data. Repeatable.")
+    p_audit.add_argument("--never-answer", action="append", metavar="LABEL",
+                         help="a label this model will never emit: when the "
+                              "cascade would name it, it declines instead. The "
+                              "per-label dial the utility profile has no way to "
+                              "express -- `--profile forage` makes the whole "
+                              "model cautious, this makes it cautious about one "
+                              "thing. Suppress the harmless LOOK-ALIKE, not the "
+                              "hazard: the harm is hemlock being called wild "
+                              "carrot, so the label to name here is the wild "
+                              "carrot. Thresholds are fitted without it and it is "
+                              "applied after, so the card prints what it cost. "
+                              "Repeatable.")
     p_audit.set_defaults(func=cmd_audit)
 
     p_pred = sub.add_parser("predict", help="classify rows with a built bundle")

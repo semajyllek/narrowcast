@@ -42,6 +42,7 @@ from narrowcast.cascade import (
     group_matrix,
     hazard_rows,
     make_splits,
+    suppress,
 )
 from narrowcast.labels import group_of
 
@@ -443,7 +444,7 @@ def hazard_metrics(te, lv, hazards, seed=0, groups=None) -> dict:
             out[label] = {
                 "n": 0, "declined": None, "named_correctly": None,
                 "named_other_hazard": None, "named_non_hazard": None,
-                "ci": None, "unmeasured": True,
+                "named_as": {}, "ci": None, "unmeasured": True,
                 "ci_unavailable_reason": "no test rows for this label",
             }
             continue
@@ -455,12 +456,18 @@ def hazard_metrics(te, lv, hazards, seed=0, groups=None) -> dict:
                     (group_only[m] & np.isin(pgen[m], list(hz_groups)))
         ci = _ci(wrong_safe.astype(float), np.ones(m.sum()),
                  te["label"].to_numpy()[m], seed=seed)
+        # Which harmless labels it was actually given. The absent path has always
+        # recorded this; without it here the card can tell an in-list caller that
+        # the gate failed but not which label to pass to `--never-answer`, which
+        # makes the remedy unusable on the path that has shipped longest.
+        got = pd.Series(pred[m][sp_safe]).value_counts().head(3).to_dict()
         out[label] = {
             "n": int(m.sum()),
             "declined": float((lv[m] == DECLINE).mean()),
             "named_correctly": float((named[m] & (pred[m] == label)).mean()),
             "named_other_hazard": float(wrong_haz.mean()),
             "named_non_hazard": float(wrong_safe.mean()),
+            "named_as": {str(k): int(v) for k, v in got.items()},
             "ci": ci,
             "unmeasured": False,
             # No interval when the catalogue offers no cluster inside one label:
@@ -520,7 +527,7 @@ def outside_hazard_metrics(te, lv, hazards, groups=None, seed=0) -> dict:
         if not m.any():
             out[label] = {"n": 0, "declined": None, "named_in_list": None,
                           "warned_at_group": None, "dangerous": None,
-                          "ci": None, "unmeasured": True,
+                          "named_as": {}, "ci": None, "unmeasured": True,
                           "ci_unavailable_reason": "no out-of-list rows for this label"}
             continue
         # every in-list name is something the user means to use
@@ -545,9 +552,25 @@ def outside_hazard_metrics(te, lv, hazards, groups=None, seed=0) -> dict:
     return out
 
 
+def _group_members(labels, groups) -> dict | None:
+    """group -> the labels in it, over the label set the model can emit.
+
+    `cascade.suppress` needs this to tell "it is an umbellifer" -- a warning worth
+    keeping -- from "it is a *Daucus*" where *Daucus carota* is the only listed
+    *Daucus*, which is the suppressed claim under another name.
+    """
+    if not labels:
+        return None
+    out = {}
+    for lab in labels:
+        g = (groups or {}).get(lab) or group_of(lab)
+        out.setdefault(g, set()).add(lab)
+    return out
+
+
 def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
                     hazards=None, groups=None, utility=None,
-                    hazards_absent=None) -> dict:
+                    hazards_absent=None, never_answer=None, labels=None) -> dict:
     """Fit thresholds on a clustered calibration half, report on the other.
 
     `groups` is the caller's label -> group map, needed by `hazard_metrics` so a
@@ -609,7 +632,13 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     else:
         calib_fine = calib_coarse = headroom = None
 
-    lv = decide(te["label_conf"].to_numpy(), te["group_conf"].to_numpy(), tg, ts)
+    # Fitted first, suppressed after. `cascade.suppress` explains why the override
+    # is kept out of `fit_thresholds`: leaving it out is what makes its cost a
+    # measurable delta rather than something the operating point absorbs.
+    lv_open = decide(te["label_conf"].to_numpy(), te["group_conf"].to_numpy(), tg, ts)
+    lv = lv_open if not never_answer else suppress(
+        lv_open, te["pred_label"].to_numpy(), never_answer,
+        te["pred_group"].to_numpy(), _group_members(labels, groups))
     w = deployment_weights(te["bucket"].to_numpy(), p_ood=p_ood, ood_mix=_mix(te))
     answered = lv != DECLINE
     correct = ((lv == LABEL) & te["label_ok"].to_numpy()) | \
@@ -641,8 +670,29 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
         "closed_set_top1": _ci(te["label_ok"].to_numpy() & inc, inc * ones, clusters),
     }
 
+    # What the override costs, in the currency the card already leads with. A
+    # suppression whose price is not printed is exactly the kind of number this
+    # tool refuses to report: a caller suppressing `Daucus carota` gives up every
+    # correct wild-carrot answer, and that trade is theirs to make with the figure
+    # in front of them.
+    suppression = None
+    if never_answer:
+        lost = (lv_open != DECLINE) & (lv == DECLINE)
+        was_right = ((lv_open == LABEL) & te["label_ok"].to_numpy()) | \
+                    ((lv_open == GROUP) & te["group_ok"].to_numpy())
+        suppression = {
+            "labels": sorted(never_answer),
+            "label_share_without": float((lv_open[inc] == LABEL).mean())
+            if inc.any() else None,
+            "label_share_with": float((lv[inc] == LABEL).mean()) if inc.any() else None,
+            "answers_removed": int(lost.sum()),
+            "correct_answers_removed": int((lost & was_right).sum()),
+            "n_test": int(len(te)),
+        }
+
     return {
         "t_group": float(tg), "t_label": float(ts), "p_ood": p_ood,
+        "suppression": suppression,
         "coverage": float(w[answered].sum() / w.sum()),
         "precision": float(w[answered & correct].sum() / w[answered].sum())
         if answered.any() else None,
@@ -666,7 +716,8 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
 
 
 def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
-                source: str, hazards=None, groups=None, utility=None) -> Path:
+                source: str, hazards=None, groups=None, utility=None,
+                never_answer=None) -> Path:
     """Head weights, thresholds, and everything needed to reproduce the claim.
 
     `groups` is the label -> group map, and storing it is what makes `predict`
@@ -698,6 +749,7 @@ def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
         "labels": chosen,
         "source": source,
         "hazards": sorted(hazards or []),
+        "never_answer": sorted(never_answer or []),
         "counts": counts,
         "composition": {k: v for k, v in composition.items()
                         if k != "outside_siblings" and not k.startswith("_")},

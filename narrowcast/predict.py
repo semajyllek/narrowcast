@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from narrowcast.cascade import DECLINE, GROUP, LABEL, decide, group_matrix
+from narrowcast.cascade import DECLINE, GROUP, LABEL, decide, group_matrix, suppress
 
 OTHER = "__OTHER__"
 
@@ -56,6 +56,10 @@ class Bundle:
         self.encoder = self.manifest["encoder"]
         self.version = self.manifest.get("bundle_version", 1)
         self.groups = self.manifest.get("groups") or None
+        # Labels this bundle will never emit. Read here rather than left to the
+        # caller: the contract is that a prediction and the card cannot disagree,
+        # and the card was written from a measurement that applied these.
+        self.never_answer = set(self.manifest.get("never_answer") or [])
 
         # The reject class is a fitted label but never an answer: the user did not
         # ask about it, and `__OTHER__` winning the argmax is a decline in every
@@ -72,6 +76,11 @@ class Bundle:
                 "rank is re-derived from each label's first whitespace token. "
                 "That is right for Linnaean binomials and wrong everywhere else — "
                 "rebuild to record the map the model was measured with")
+        if self.never_answer:
+            out.append(
+                f"{len(self.never_answer)} label(s) suppressed at predict time and "
+                f"never answered: " + ", ".join(sorted(self.never_answer))
+                + " — the same suppression the card was measured under")
         if OTHER not in set(self.classes.tolist()):
             out.append(
                 "no reject class was fitted, so this model cannot decline for "
@@ -102,12 +111,19 @@ class Bundle:
         gscore = cata @ self.gmat.T
         names = self.classes[self.mask]
         label_conf, group_conf = cata.max(1), gscore.max(1)
+        pred_label = names[cata.argmax(1)]
+        pred_group = self.ugroups[gscore.argmax(1)]
         lv = decide(label_conf, group_conf, self.t_group, self.t_label)
+        if self.never_answer:
+            members = {}
+            for j, g in enumerate(self.ugroups):
+                members[str(g)] = {str(n) for n in names[self.gmat[j] > 0]}
+            lv = suppress(lv, pred_label, self.never_answer, pred_group, members)
 
         out = []
         for i, rank in enumerate(lv):
-            label = str(names[cata[i].argmax()])
-            group = str(self.ugroups[gscore[i].argmax()])
+            label = str(pred_label[i])
+            group = str(pred_group[i])
             out.append({
                 "rank": rank,
                 "answer": label if rank == LABEL else (group if rank == GROUP else None),

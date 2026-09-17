@@ -64,7 +64,8 @@ def _absent_hazard_section(hz: dict) -> list:
               f"user an unlisted dangerous plant is one of theirs. The bar set in "
               f"advance is {_pct(HAZARD_BAR)}.", "",
               "> Raising `--ood-rate` is what fixes this: it lifts the decline "
-              "threshold, and declining is always safe here.", ""]
+              "threshold, and declining is always safe here.", "",
+              _suppress_hint(measured, fails), ""]
     else:
         L += [f"All {len(measured)} stay under the {_pct(HAZARD_BAR)} bar; worst "
               f"case {_pct(worst)}.", ""]
@@ -85,6 +86,64 @@ def _absent_hazard_section(hz: dict) -> list:
                   "no rows for them at all, not that the shuffle missed them. "
                   "Fetch data for them or stop declaring them; an unmeasured "
                   "hazard is not a safe one."]
+    return L
+
+
+def _suppress_hint(measured: dict, fails: list) -> str:
+    """Name the labels to pass to `--never-answer`, not the hazard.
+
+    This section used to advise treating the consequential labels themselves as
+    always-decline, which is inert: `build.hazard_metrics` counts rows whose
+    prediction is *not* the hazard, so suppressing the hazard moves rows out of
+    `named_correctly` and leaves the dangerous rate exactly where it was. The
+    label worth suppressing is the harmless one the hazard gets called, which
+    `named_as` now records on both threat models.
+    """
+    got = {}
+    for k in fails:
+        for lab, n in (measured[k].get("named_as") or {}).items():
+            got[lab] = got.get(lab, 0) + n
+    if not got:
+        return ("> No single harmless label dominates the errors, so there is "
+                "nothing specific to suppress — the union is spread thin, which "
+                "is the case `--ood-rate` exists for.")
+    top = sorted(got.items(), key=lambda kv: -kv[1])[:3]
+    return ("> The names actually given were "
+            + ", ".join(f"**{lab}** ({n})" for lab, n in top)
+            + ". Suppressing those — `"
+            + " ".join(f'--never-answer "{lab}"' for lab, _ in top)
+            + "` — is the per-label version of this, and costs every correct "
+              "answer for those labels. Suppressing the consequential label "
+              "itself does nothing: the rate counts rows named as something "
+              "else, and those rows are already not it.")
+
+
+def _suppression_section(sup: dict | None) -> list:
+    """What `--never-answer` bought and what it cost.
+
+    The buying is visible in the hazard sections above. This is the bill, and it
+    is printed because a per-label safety dial whose price is not stated is the
+    kind of number this tool exists to refuse: suppressing *Daucus carota* gives
+    up every correct wild-carrot answer, and that trade belongs to the reader.
+    """
+    if not sup:
+        return []
+    L = ["## Labels this model will never answer", "",
+         "These were suppressed with `--never-answer`: when the cascade would "
+         "name one, it declines instead. The thresholds were fitted *without* the "
+         "suppression and it was applied after, so the figures below are what it "
+         "cost rather than something the operating point absorbed.", "",
+         "- " + "\n- ".join(f"**{x}**" for x in sup["labels"]), ""]
+    if sup["label_share_without"] is not None:
+        L += [f"Label-level share falls from **{_pct(sup['label_share_without'])}** "
+              f"to **{_pct(sup['label_share_with'])}** on in-list rows. "
+              f"{sup['answers_removed']} of {sup['n_test']} test answers became "
+              f"declines, {sup['correct_answers_removed']} of which were correct.",
+              ""]
+    L += ["A group answer still stands where its group holds something else, "
+          "because \"it is an umbellifer\" warns the reader while naming a "
+          "suppressed label would not. Where a suppressed label is the only one "
+          "in its group, the group answer goes too.", ""]
     return L
 
 
@@ -125,7 +184,9 @@ def _hazard_section(hz: dict) -> list:
               f">",
               f"> Reducing coverage is what fixes this: the same model measured "
               f"at lower coverage answers less and is wrong less. Rebuild with a "
-              f"higher `--ood-rate`, or treat these labels as always-decline.", ""]
+              f"higher `--ood-rate`, or suppress the harmless labels these are "
+              f"given, with `--never-answer`.", ""]
+        L += [_suppress_hint(measured, fails), ""]
     else:
         L += [f"All {len(measured)} consequential labels are under the "
               f"{_pct(HAZARD_BAR)} bar; worst case {_pct(worst)}.", ""]
@@ -482,6 +543,7 @@ def render(manifest: dict) -> str:
 
     L += _hazard_section(m.get("hazard") or {})
     L += _absent_hazard_section(m.get("hazard_absent") or {})
+    L += _suppression_section(m.get("suppression"))
 
     L += ["## Where it declines and where it errs", "", "| bucket | n | answered | correct when answered |",
           "|---|---|---|---|"]
