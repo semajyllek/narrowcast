@@ -1392,16 +1392,20 @@ def test_the_card_prints_what_the_suppression_cost():
     this tool exists to refuse."""
     df = _e2e_frame()
     labels = sorted(set(df.loc[df["in_catalog"], "label"]))
-    m = build.fit_and_measure(df, p_ood=0.2, never_answer=["G0 sp0"], labels=labels)
+    # a label the model actually answers *in the test half*, so the assertion is
+    # about the suppression rather than about which half the split chose
+    te = df[cascade.make_splits(df, seed=0) == "test"]
+    victim = te.loc[te["in_catalog"], "pred_label"].value_counts().index[0]
+    m = build.fit_and_measure(df, p_ood=0.2, never_answer=[victim], labels=labels)
     s = m["suppression"]
-    assert s["labels"] == ["G0 sp0"]
+    assert s["labels"] == [victim]
     assert s["label_share_with"] <= s["label_share_without"]
     assert s["answers_removed"] > 0
     man = _manifest(0.85)
     man["metrics"]["suppression"] = s
     txt = card.render(man)
     assert "never answer" in txt.lower()
-    assert "G0 sp0" in txt
+    assert victim in txt
 
 
 def test_the_card_points_at_the_lookalike_not_the_consequential_label():
@@ -1586,7 +1590,7 @@ def test_the_gate_fires_and_pays_when_the_reject_mass_separates_the_buckets():
     """Without this the suite cannot tell "the fit correctly turned it off" from
     "the gate never works" — which is exactly how the dead retreat arm survived
     two fixtures."""
-    m = build.fit_and_measure(_gate_frame(), p_ood=0.1, gate=True)
+    m = build.fit_and_measure(_gate_frame(), p_ood=0.05, gate=True)
     g = m["novelty_gate"]
     assert g["fitted"] and not g["fit_turned_it_off"]
     assert g["calib_utility_gained"] > 0
@@ -1946,3 +1950,44 @@ def test_the_files_encoder_declaration_beats_the_flag(tmp_path):
     assert "disagrees with" in r.stderr
     man = json.loads((tmp_path / "b" / "manifest.json").read_text())
     assert man["encoder"] == "bioclip2_cml4"
+
+
+def test_renaming_one_bucket_does_not_reshuffle_the_others():
+    """`make_splits` shared one generator across `df.groupby("bucket")`, so every
+    bucket's split depended on the alphabetical order of the bucket *names*.
+    Flagging out-of-list rows as `regional_ood` renames a bucket and nothing else,
+    and it moved coverage by 12 points on one seed by reshuffling `in_catalog`
+    and `near_ood` as a side effect."""
+    f = _e2e_frame()
+    f.loc[f["bucket"] == "near_ood", "species"] = "shared sp"
+    renamed = f.copy()
+    renamed["bucket"] = renamed["bucket"].replace({"near_ood": "regional_ood"})
+    a, b = cascade.make_splits(f, seed=0), cascade.make_splits(renamed, seed=0)
+    untouched = (f["bucket"] == "in_catalog").to_numpy()
+    assert untouched.any()
+    assert (a[untouched].values == b[untouched].values).all()
+
+
+def test_each_bucket_still_splits_about_in_half():
+    """The per-bucket generator must not cost the property the loop existed for."""
+    f = _e2e_frame()
+    fold = cascade.make_splits(f, seed=0)
+    for b, g in f.groupby("bucket"):
+        share = (fold[g.index] == "calib").mean()
+        assert 0.2 <= share <= 0.8, (b, share)
+
+
+def test_relabelling_a_bucket_does_not_change_the_split_at_all():
+    """A pure relabelling — the same rows, the same clusters, a different bucket
+    name — must produce the same split. It did not: keyed on nothing it moved
+    every bucket, keyed on the name it still moved the renamed one, and coverage
+    swung 12 points on real Oregon data for no reason but the label."""
+    f = _e2e_frame()
+    f.loc[f["bucket"] == "near_ood", "bucket"] = "distant_ood"   # both key on `label`
+    renamed = f.copy()
+    renamed["bucket"] = renamed["bucket"].replace({"distant_ood": "regional_ood"})
+    assert (cascade.make_splits(f, seed=0).values ==
+            cascade.make_splits(renamed, seed=0).values).all()
+    # and a rename that genuinely changes the split *key* is allowed to differ:
+    # `near_ood` clusters on the group, `regional_ood` on the label
+    assert cascade.SPLIT_CLUSTER["near_ood"] != cascade.SPLIT_CLUSTER["regional_ood"]

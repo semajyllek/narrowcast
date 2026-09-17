@@ -1,7 +1,7 @@
 # narrowcast — orientation for a new session
 
 **Audit a classifier over a narrow label set, and the truth about how it will
-fail.** Public, MIT, pip-installable, 138 tests, CI on 3.10/3.12/3.13.
+fail.** Public, MIT, pip-installable, 141 tests, CI on 3.10/3.12/3.13.
 
 Extracted from [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid), which remains
 the research record — **every number in the README traces to a findings doc
@@ -95,6 +95,16 @@ why. We measured someone else's model; we did not obtain a copy of it.
   `encoder`, compared and refused on mismatch. narrowcast cannot verify either
   claim and does not try — comparing two declarations is strictly better than
   comparing none.
+- **`make_splits` keys each bucket's shuffle on its *contents*, not its name and
+  not a shared stream.** Shared, every bucket's split depended on the alphabetical
+  order of the bucket names: flagging out-of-list rows as `regional_ood` renames a
+  bucket and changes nothing else about the data, and it reshuffled `in_catalog`
+  and `near_ood` as a side effect — 12 points of coverage on real Oregon data, from
+  a relabelling. Keyed on the name that side effect goes but the renamed bucket
+  still resplits. Keyed on the clusters it actually holds, identical rows give an
+  identical split whatever the bucket is called. Pinned by a test. A rename that
+  changes the split *key* (`near_ood` clusters on the group, the others on the
+  label) is still allowed to differ, because then the data really did change.
 - **`regional_ood` is the caller's to declare and is never derived.** An optional
   `regional` boolean column marks which out-of-list rows the deployment could
   plausibly be shown. With it present the mix becomes `OOD_MIX_REGIONAL` and the

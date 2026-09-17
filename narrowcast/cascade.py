@@ -389,7 +389,6 @@ def make_splits(df, seed=0, hazards=None):
     mistake `build.load_scored` records as having silently broken a published
     table.
     """
-    rng = np.random.RandomState(seed)
     fold = pd.Series("test", index=df.index, dtype=object)
     for bucket, group in df.groupby("bucket"):
         key = SPLIT_CLUSTER.get(bucket, "label")
@@ -397,6 +396,21 @@ def make_splits(df, seed=0, hazards=None):
             if not _too_coarse(group, "species"):
                 key = "species"
         clusters = np.array(sorted(group[key].unique()))
+        # One generator per bucket, keyed on the seed and the bucket's *contents*
+        # -- the clusters it actually holds under the key actually chosen. Not on
+        # its name, and emphatically not a single stream shared across this loop.
+        #
+        # Shared, every bucket's split depended on the *alphabetical order* of the
+        # bucket names, so flagging out-of-list rows as `regional_ood` -- which
+        # renames a bucket and changes nothing else about the data -- reshuffled
+        # `in_catalog` and `near_ood` as a side effect and moved coverage by 12
+        # points on one seed. Keyed on the name, that side effect goes but the
+        # renamed bucket still resplits, so a pure relabelling still moves the
+        # headline. Keyed on contents, identical rows give an identical split
+        # whatever the bucket is called, and the split depends only on things a
+        # split should depend on.
+        fingerprint = zlib.crc32("\x00".join(clusters.tolist()).encode()) % 2**31
+        rng = np.random.RandomState([seed, fingerprint])
         rng.shuffle(clusters)
         calib = set(clusters[: len(clusters) // 2])
         fold[group.index[group[key].isin(calib)]] = "calib"
