@@ -64,6 +64,12 @@ class Dataset:
     group: np.ndarray | None = None   # caller-supplied coarse rank, per eval row
     origin_train: np.ndarray | None = None   # acquisition source per training row
     origin_eval: np.ndarray | None = None    # ... and per eval row
+    # The real species of every eval row, in-list or not. `truth` collapses every
+    # out-of-list row to OTHER and `cluster` may be an arbitrary id, so without
+    # this the identity of an out-of-list row is not recoverable from the frame --
+    # which makes "how often is *this particular* unlisted plant misnamed"
+    # unanswerable. Needed by `outside_hazard_metrics`.
+    species: np.ndarray | None = None
 
 
 def _l2(X):
@@ -150,7 +156,8 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
                    np.vstack(ev), np.concatenate(truth), np.array(bucket), counts,
                    np.concatenate(cluster), np.concatenate(group),
                    np.concatenate(o_tr) if has_origin else None,
-                   np.concatenate(o_ev) if has_origin else None)
+                   np.concatenate(o_ev) if has_origin else None,
+                   species=np.concatenate(cluster))
 
 
 def load_scored(rows, seed: int = 0) -> Dataset:
@@ -206,7 +213,8 @@ def load_scored(rows, seed: int = 0) -> Dataset:
     return Dataset(empty, np.asarray([], dtype=str), pd.DataFrame(),
                    empty, truth, bucket, counts,
                    np.asarray(rows.cluster, dtype=str), group,
-                   None, None if rows.origin is None else np.asarray(rows.origin, dtype=str))
+                   None, None if rows.origin is None else np.asarray(rows.origin, dtype=str),
+                   species=label)
 
 
 def fit_head(ds: Dataset, C: float = 10.0) -> LogisticRegression:
@@ -354,6 +362,8 @@ def frame_from_posteriors(proba, classes, ds: Dataset) -> pd.DataFrame:
         "label": ds.cluster,
         "group": (ds.group if ds.group is not None
                   else np.array([group_of(c) for c in ds.cluster])),
+        # The real species, in-list or not; see `Dataset.species`.
+        "species": ds.species if ds.species is not None else ds.cluster,
     })
 
 
@@ -463,8 +473,80 @@ def hazard_metrics(te, lv, hazards, seed=0, groups=None) -> dict:
     return out
 
 
+def outside_hazard_metrics(te, lv, hazards, groups=None, seed=0) -> dict:
+    """For a dangerous species the user deliberately did **not** list: how often
+    does it receive the name of something they did?
+
+    `hazard_metrics` answers the opposite question -- "my list contains something
+    dangerous, how often is it given a harmless name" -- and requires the hazard to
+    be a label. That is the right model for a catalogue that includes hazards on
+    purpose. It cannot express a forager's, where the dangerous plant is absent by
+    design: nobody lists poison hemlock among things they intend to eat, so
+    `--hazard "Conium maculatum"` is correctly refused, and the risk goes
+    unmeasured.
+
+    Here every in-list label is by construction something the user believes they
+    can use, so **any label answer is dangerous**. The asymmetry with the in-list
+    case is deliberate: there, being named as *another* hazard is wrong but not
+    dangerous; here there is no such escape, because everything nameable is
+    something the user wants.
+
+    A group answer is safe only when the named group contains a declared hazard --
+    "it is an umbellifer" genuinely warns the person holding the root, where "it is
+    a *Lomatium*" is a species-level claim wearing the clothes of caution. That
+    distinction only works if the bundle groups by something coarse enough to
+    contain the hazard, which is why `groups` matters here as much as it does in
+    `hazard_metrics`.
+
+    Rows are found by the *clustering* column, which holds an out-of-list row's
+    real species name -- `truth` is `OTHER` for all of them by construction.
+    """
+    if not hazards:
+        return {}
+    hz = set(hazards)
+    hz_groups = ({groups[h] for h in hz if h in groups} if groups
+                 else {h.split()[0] for h in hz})
+    real = te["species"].to_numpy()          # the real species, even out-of-list
+    pgen = te["pred_group"].to_numpy()
+    pred = te["pred_label"].to_numpy()
+    in_cat = te["in_catalog"].to_numpy()
+    named = lv == LABEL
+    group_only = (lv != LABEL) & (lv != DECLINE)
+
+    out = {}
+    for label in sorted(hz):
+        m = (real == label) & ~in_cat
+        if not m.any():
+            out[label] = {"n": 0, "declined": None, "named_in_list": None,
+                          "warned_at_group": None, "dangerous": None,
+                          "ci": None, "unmeasured": True,
+                          "ci_unavailable_reason": "no out-of-list rows for this label"}
+            continue
+        # every in-list name is something the user means to use
+        danger_sp = named[m]
+        danger_gn = group_only[m] & ~np.isin(pgen[m], list(hz_groups))
+        dangerous = danger_sp | danger_gn
+        ci = _ci(dangerous.astype(float), np.ones(int(m.sum())),
+                 te["label"].to_numpy()[m], seed=seed)
+        top = pd.Series(pred[m & (lv == LABEL)]).value_counts().head(3).to_dict()
+        out[label] = {
+            "n": int(m.sum()),
+            "declined": float((lv[m] == DECLINE).mean()),
+            "named_in_list": float(danger_sp.mean()),
+            "warned_at_group": float((group_only[m] &
+                                      np.isin(pgen[m], list(hz_groups))).mean()),
+            "dangerous": float(dangerous.mean()),
+            "named_as": {str(k): int(v) for k, v in top.items()},
+            "ci": ci,
+            "unmeasured": False,
+            "ci_unavailable_reason": None if ci else "no cluster within a single label",
+        }
+    return out
+
+
 def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
-                    hazards=None, groups=None, utility=None) -> dict:
+                    hazards=None, groups=None, utility=None,
+                    hazards_absent=None) -> dict:
     """Fit thresholds on a clustered calibration half, report on the other.
 
     `groups` is the caller's label -> group map, needed by `hazard_metrics` so a
@@ -572,6 +654,8 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
         "n_label_clusters": int(len(set(clusters[inc]))),
         "per_bucket": per_bucket,
         "hazard": hazard_metrics(te, lv, hazards, seed=seed, groups=groups),
+        "hazard_absent": outside_hazard_metrics(te, lv, hazards_absent,
+                                                groups=groups, seed=seed),
         "n_calib": int(len(cal)), "n_test": int(len(te)),
     }
 

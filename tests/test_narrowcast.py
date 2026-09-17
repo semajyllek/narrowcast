@@ -1066,3 +1066,85 @@ def test_the_manifest_records_the_payoffs_actually_used(tmp_path):
                             source="t", utility=cascade.PROFILES["forage"])
     man = _json.loads((out / "manifest.json").read_text())
     assert man["utility"]["wrong"] == -20.0
+
+
+# ---- the forager's threat model: a hazard deliberately NOT on the list -------
+
+def _absent_frame(pred_label, pred_group, real, in_cat):
+    """`species` carries the real identity; `label` is the clustering column and
+    may be an arbitrary id, which is exactly why `species` had to be added."""
+    return pd.DataFrame({"pred_label": pred_label, "pred_group": pred_group,
+                         "truth": [build.OTHER] * len(real), "species": real,
+                         "label": [f"cl{i}" for i in range(len(real))],
+                         "in_catalog": in_cat})
+
+
+def test_any_in_list_name_for_an_unlisted_hazard_is_dangerous():
+    """Every listed label is something the user means to use, so unlike the
+    in-list case there is no "named as another hazard" escape."""
+    real = ["Conium maculatum"] * 4
+    te = _absent_frame(["Daucus carota"] * 4, ["Apiaceae"] * 4, real, [False] * 4)
+    lv = np.array([build.LABEL] * 4)
+    out = build.outside_hazard_metrics(te, lv, {"Conium maculatum"})
+    assert out["Conium maculatum"]["dangerous"] == 1.0
+    assert out["Conium maculatum"]["named_as"] == {"Daucus carota": 4}
+
+
+def test_a_group_answer_naming_the_hazards_own_group_is_a_warning_not_an_error():
+    """"It is an umbellifer" warns the person holding the root. "It is a Lomatium"
+    is a species-level claim wearing the clothes of caution."""
+    real = ["Conium maculatum"] * 4
+    groups = {"Conium maculatum": "Apiaceae"}
+    te = _absent_frame(["-"] * 4, ["Apiaceae"] * 4, real, [False] * 4)
+    lv = np.array([build.GROUP] * 4)
+    safe = build.outside_hazard_metrics(te, lv, {"Conium maculatum"}, groups=groups)
+    assert safe["Conium maculatum"]["dangerous"] == 0.0
+    assert safe["Conium maculatum"]["warned_at_group"] == 1.0
+
+    te2 = _absent_frame(["-"] * 4, ["Lomatium"] * 4, real, [False] * 4)
+    unsafe = build.outside_hazard_metrics(te2, lv, {"Conium maculatum"}, groups=groups)
+    assert unsafe["Conium maculatum"]["dangerous"] == 1.0
+
+
+def test_declining_an_unlisted_hazard_is_always_safe():
+    real = ["Conium maculatum"] * 3
+    te = _absent_frame(["-"] * 3, ["-"] * 3, real, [False] * 3)
+    lv = np.array([build.DECLINE] * 3)
+    out = build.outside_hazard_metrics(te, lv, {"Conium maculatum"})
+    assert out["Conium maculatum"]["dangerous"] == 0.0
+    assert out["Conium maculatum"]["declined"] == 1.0
+
+
+def test_in_list_rows_are_not_counted_for_an_absent_hazard():
+    """Only out-of-list rows can be this kind of error."""
+    real = ["Conium maculatum"] * 2 + ["Daucus carota"] * 2
+    te = _absent_frame(["Daucus carota"] * 4, ["Apiaceae"] * 4, real,
+                       [False, False, True, True])
+    lv = np.array([build.LABEL] * 4)
+    out = build.outside_hazard_metrics(te, lv, {"Conium maculatum"})
+    assert out["Conium maculatum"]["n"] == 2
+
+
+def test_an_absent_hazard_with_no_rows_is_unmeasured_not_passed():
+    te = _absent_frame(["x"], ["y"], ["Daucus carota"], [True])
+    lv = np.array([build.DECLINE])
+    out = build.outside_hazard_metrics(te, lv, {"Conium maculatum"})
+    assert out["Conium maculatum"]["unmeasured"] is True
+
+
+def test_card_reports_an_unmeasured_absent_hazard_rather_than_staying_quiet():
+    """A declared risk with no data must not read as a passed check."""
+    from narrowcast.card import _absent_hazard_section
+    txt = "\n".join(_absent_hazard_section(
+        {"Conium maculatum": {"unmeasured": True, "n": 0, "dangerous": None}}))
+    assert "none of this was measured" in txt
+    assert "not a passed check" in txt
+
+
+def test_card_fires_on_an_absent_hazard_over_the_bar():
+    from narrowcast.card import _absent_hazard_section
+    txt = "\n".join(_absent_hazard_section({"Conium maculatum": {
+        "unmeasured": False, "n": 100, "dangerous": 0.045, "named_in_list": 0.045,
+        "warned_at_group": 0.0, "declined": 0.955}}))
+    assert "⚠" in txt and "4.5%" in txt
+    assert "--ood-rate" in txt

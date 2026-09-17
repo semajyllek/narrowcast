@@ -154,17 +154,46 @@ def fit_thresholds(label_conf, group_conf, label_ok, group_ok, in_catalog,
     return best, best_u
 
 
+# A split key is too coarse when one cluster can swallow a whole side of the
+# split. Counting clusters is not the test -- five groups sounds like plenty and
+# still puts a third of the bucket in one of them.
+MAX_CLUSTER_SHARE = 0.34
+
+
+def _too_coarse(group, key) -> bool:
+    """True when one cluster under `key` is big enough to take a whole side."""
+    if key not in group or group[key].nunique() < 2:
+        return True
+    return float(group[key].value_counts().iloc[0]) / len(group) > MAX_CLUSTER_SHARE
+
+
 def make_splits(df, seed=0):
     """Assign 'calib'/'test' per row, splitting on the cluster for each bucket.
 
     Clustered because ~6 observations share a species and species difficulty is
     the dominant variance component; an observation-level split would put the
     same difficulty on both sides.
+
+    `near_ood` keys on the *group* so a whole genus falls on one side. That is
+    right when the group is a genus and **fails when it is coarser**: a bundle
+    grouped by family gives every unlisted umbellifer the same key, so all of them
+    land together and none reaches the test half. The failure is silent -- the
+    bucket simply has no test rows, and anything measured over it reports "no
+    data" rather than an error, which is how a safety check came back "not
+    measured" with every photograph present.
+
+    So a key that lets one cluster take more than `MAX_CLUSTER_SHARE` of a bucket
+    is rejected in favour of the finest identity that still prevents leakage: the
+    real species. Counting clusters is not enough -- five families sounds like
+    plenty and still puts a third of the bucket in one of them.
     """
     rng = np.random.RandomState(seed)
     fold = pd.Series("test", index=df.index, dtype=object)
     for bucket, group in df.groupby("bucket"):
         key = SPLIT_CLUSTER.get(bucket, "label")
+        if _too_coarse(group, key) and "species" in group:
+            if not _too_coarse(group, "species"):
+                key = "species"
         clusters = np.array(sorted(group[key].unique()))
         rng.shuffle(clusters)
         calib = set(clusters[: len(clusters) // 2])

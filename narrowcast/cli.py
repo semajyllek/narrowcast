@@ -96,8 +96,17 @@ def cmd_audit(args):
         print(f"  note: utility profile {args.profile!r} -- wrong answers cost "
               f"{utility['wrong']} against the default {CA.UTILITY['wrong']}. "
               "Thresholds are fitted against these payoffs.", file=sys.stderr)
+    absent = list(args.hazard_absent or [])
+    if absent:
+        present = [h for h in absent if h in set(chosen)]
+        if present:
+            raise SystemExit(
+                "these --hazard-absent labels ARE on the list: "
+                + ", ".join(present)
+                + "\nUse --hazard for those; the two measure opposite things.")
     metrics = B.fit_and_measure(frame, p_ood=args.ood_rate, hazards=hazards,
-                                groups=gmap, utility=utility)
+                                groups=gmap, utility=utility,
+                                hazards_absent=absent)
 
     if args.deployment_origin:
         if scored:
@@ -192,6 +201,13 @@ def main(argv=None):
                          help="a label where being wrong is expensive; repeatable")
     p_audit.add_argument("--hazard-file", metavar="FILE",
                          help="file with one such label per line")
+    p_audit.add_argument("--hazard-absent", action="append", metavar="LABEL",
+                         help="a dangerous species deliberately NOT on the list, "
+                              "measured for how often it receives the name of one "
+                              "that is. This is the forager's case: nobody lists "
+                              "poison hemlock among things they mean to eat, so "
+                              "--hazard refuses it and the risk goes unmeasured. "
+                              "Needs rows for it in the data. Repeatable.")
     p_audit.set_defaults(func=cmd_audit)
 
     p_pred = sub.add_parser("predict", help="classify rows with a built bundle")

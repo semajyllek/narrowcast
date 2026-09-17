@@ -38,6 +38,53 @@ HAZARD_BAR = 0.01   # declared, not tuned: see OREGON_SAFETY_FINDINGS.md
 GROUP_RETREAT_BAR = 0.10
 
 
+def _absent_hazard_section(hz: dict) -> list:
+    """Dangerous species the user deliberately did not list.
+
+    Separate from `_hazard_section` because it answers the opposite question and
+    a reader must not confuse them: there, a listed hazard given a harmless name;
+    here, an unlisted hazard given the name of something the user means to use.
+    """
+    if not hz:
+        return []
+    measured = {k: v for k, v in hz.items() if not v.get("unmeasured")}
+    L = ["", "## Dangerous look-alikes you did not list", ""]
+    if not measured:
+        L += ["No rows for any of them, so **none of this was measured**. A "
+              "declared risk with no data is not a passed check.", ""]
+        for k in sorted(hz):
+            L.append(f"- **{k}** — not measured")
+        return L
+    worst = max(v["dangerous"] for v in measured.values())
+    fails = [k for k, v in measured.items() if v["dangerous"] > HAZARD_BAR]
+    if fails:
+        L += [f"> ### ⚠ {len(fails)} of {len(measured)} dangerous look-alikes get a "
+              f"name from your list", "",
+              f"> Worst case **{_pct(worst)}** — that often, this model tells the "
+              f"user an unlisted dangerous plant is one of theirs. The bar set in "
+              f"advance is {_pct(HAZARD_BAR)}.", "",
+              "> Raising `--ood-rate` is what fixes this: it lifts the decline "
+              "threshold, and declining is always safe here.", ""]
+    else:
+        L += [f"All {len(measured)} stay under the {_pct(HAZARD_BAR)} bar; worst "
+              f"case {_pct(worst)}.", ""]
+    L += ["| look-alike | n | named from your list | warned at group | declined |",
+          "|---|---|---|---|---|"]
+    for k, v in sorted(hz.items(), key=lambda kv: -(kv[1].get("dangerous") or -1)):
+        if v.get("unmeasured"):
+            L.append(f"| {k} | 0 | — | — | — |")
+            continue
+        mark = " ⚠" if v["dangerous"] > HAZARD_BAR else ""
+        L.append(f"| {k}{mark} | {v['n']} | {_pct(v['named_in_list'])} | "
+                 f"{_pct(v['warned_at_group'])} | {_pct(v['declined'])} |")
+    unmeasured = [k for k, v in hz.items() if v.get("unmeasured")]
+    if unmeasured:
+        L += ["", f"**{len(unmeasured)} declared and not measured** (no rows): "
+                  + ", ".join(sorted(unmeasured)) + ". Fetch data for them or "
+                  "stop declaring them; an unmeasured hazard is not a safe one."]
+    return L
+
+
 def _hazard_section(hz: dict) -> list:
     """The union rate, reported as a gate rather than a statistic.
 
@@ -408,6 +455,7 @@ def render(manifest: dict) -> str:
     L += _origin_section(m.get("origin_cost"))
 
     L += _hazard_section(m.get("hazard") or {})
+    L += _absent_hazard_section(m.get("hazard_absent") or {})
 
     L += ["## Where it declines and where it errs", "", "| bucket | n | answered | correct when answered |",
           "|---|---|---|---|"]
