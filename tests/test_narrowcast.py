@@ -985,3 +985,84 @@ def test_the_card_does_not_invent_a_training_set_it_was_never_shown(tmp_path):
     text = card.render(json.loads((out / "manifest.json").read_text()))
     assert "Training rows not known to this tool" in text
     assert "size not stated" in text
+
+
+# ---- hazard: the caller's group map, and hazards that vanish -----------------
+
+def _haz_frame2(pred_label, pred_group, truth):
+    return pd.DataFrame({"pred_label": pred_label, "pred_group": pred_group,
+                         "truth": truth, "label": truth})
+
+
+def test_hazard_groups_come_from_the_supplied_map_not_the_first_token():
+    """A foraging list groups by family, so poison hemlock's group is `Apiaceae`.
+
+    Deriving "Conium" from the name means the hazard's own group is never
+    recognised, so the one coarse answer that is actually a *warning* --
+    "it is an umbellifer" -- gets counted as a dangerous mistake.
+    """
+    truth = ["Conium maculatum"] * 4
+    # every answer is the group, and the group contains the hazard
+    te = _haz_frame2(["-"] * 4, ["Apiaceae"] * 4, truth)
+    lv = np.array([build.GROUP] * 4)
+    groups = {"Conium maculatum": "Apiaceae", "Daucus carota": "Apiaceae"}
+
+    with_map = build.hazard_metrics(te, lv, {"Conium maculatum"}, groups=groups)
+    assert with_map["Conium maculatum"]["named_non_hazard"] == 0.0
+
+    # without the map the same answers read as four dangerous errors
+    without = build.hazard_metrics(te, lv, {"Conium maculatum"})
+    assert without["Conium maculatum"]["named_non_hazard"] == 1.0
+
+
+def test_a_hazard_with_no_test_rows_is_reported_unmeasured_not_skipped():
+    """It used to `continue`, so the label vanished and the card counted the
+    survivors and said "all N are under the bar"."""
+    te = _haz_frame2(["Daucus carota"], ["Daucus"], ["Daucus carota"])
+    lv = np.array([build.LABEL])
+    out = build.hazard_metrics(te, lv, {"Conium maculatum"})
+    assert "Conium maculatum" in out
+    assert out["Conium maculatum"]["unmeasured"] is True
+    assert out["Conium maculatum"]["n"] == 0
+    assert out["Conium maculatum"]["named_non_hazard"] is None
+
+
+# ---- declared utility profiles ----------------------------------------------
+
+def test_profiles_are_declared_and_ordered_by_stakes():
+    p = cascade.PROFILES
+    assert p["standard"] == cascade.UTILITY
+    assert (p["identify"]["wrong"] > p["standard"]["wrong"]
+            > p["conserve"]["wrong"] > p["forage"]["wrong"])
+
+
+def test_a_harsher_profile_buys_abstention():
+    """`wrong` is the stakes dial: raising its magnitude should not increase the
+    share of answers given."""
+    rng = np.random.default_rng(0)
+    n = 400
+    sc = rng.uniform(0.2, 1.0, n)
+    ok = rng.uniform(size=n) < sc
+    gc = np.clip(sc + 0.1, 0, 1)
+    args = (sc, gc, ok, ok, np.ones(n, bool))
+    (tg_i, tl_i), _ = cascade.fit_thresholds(*args, weights=cascade.PROFILES["identify"])
+    (tg_f, tl_f), _ = cascade.fit_thresholds(*args, weights=cascade.PROFILES["forage"])
+    answered_i = (cascade.decide(sc, gc, tg_i, tl_i) != cascade.DECLINE).mean()
+    answered_f = (cascade.decide(sc, gc, tg_f, tl_f) != cascade.DECLINE).mean()
+    assert answered_f <= answered_i
+
+
+def test_the_manifest_records_the_payoffs_actually_used(tmp_path):
+    """Recording the module default would make a bundle lie about how its
+    thresholds were fitted, and the payoffs are the one input that has to stay
+    legible after the fact."""
+    import json as _json
+
+    from sklearn.linear_model import LogisticRegression
+    X = np.random.RandomState(0).normal(size=(40, 4))
+    y = np.array(["a"] * 20 + ["b"] * 20)
+    clf = LogisticRegression(max_iter=500).fit(X, y)
+    out = build.save_bundle(tmp_path / "b", clf, ["a", "b"], "enc", {}, {}, {},
+                            source="t", utility=cascade.PROFILES["forage"])
+    man = _json.loads((out / "manifest.json").read_text())
+    assert man["utility"]["wrong"] == -20.0

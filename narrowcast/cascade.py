@@ -33,6 +33,33 @@ OOD_MIX_GLOBAL = {"near_ood": 0.32, "distant_ood": 0.68}
 UTILITY = {"label_correct": 1.0, "group_correct": 0.5, "wrong": -4.0,
            "decline_ood": 1.0, "decline_in_catalog": 0.0}
 
+
+# Declared profiles. `wrong` is the stakes dial: it is what the threshold fit
+# trades coverage against, so raising its magnitude buys abstention.
+#
+# These are written down here, in advance and with reasons, which is the
+# discipline `CLAUDE.md` asks for -- "declare utilities before fitting; changing
+# it is a deliberate act with a written reason". Selecting *among* them from
+# properties of the label set is legitimate, because the label set is known
+# before any row is scored. Selecting from measured outcomes would be reading the
+# payoffs off the test set, which is the degeneracy the rule exists to prevent.
+#
+# The magnitudes come from the frontier recorded in plantid's `eval/rejection.py`:
+# mu = 2 gives precision 0.944 at coverage 0.797, mu = 4 gives 0.965 / 0.747,
+# mu = 8 gives 0.967 / 0.671, mu = 32 gives 0.991 / 0.645. Past about 8 the
+# precision gain flattens and only coverage is spent.
+PROFILES = {
+    # Being wrong is cheap: a misnamed garden plant costs curiosity, not health.
+    "identify": {**UTILITY, "wrong": -2.0},
+    # The declared default, and the one every published number here was fitted at.
+    "standard": dict(UTILITY),
+    # Someone may eat it. Abstention is worth far more than an answer, and the
+    # bar the card gates on is 1% of consequential labels given a harmless name.
+    "forage": {**UTILITY, "wrong": -20.0, "decline_ood": 1.0},
+    # A false positive costs an expert's time rather than a life, but still costs.
+    "conserve": {**UTILITY, "wrong": -6.0},
+}
+
 def group_matrix(classes, mask, group_map=None):
     """(n_groups, n_labels) indicator G, and the group name per row.
 

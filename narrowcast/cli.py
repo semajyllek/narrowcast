@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from narrowcast import build as B
+from narrowcast import cascade as CA
 from narrowcast import card as C
 from narrowcast import labels as S
 from narrowcast import predict as PRED, sources as SRC
@@ -90,7 +91,13 @@ def cmd_audit(args):
         clf = B.fit_head(ds)
         frame = B.score_frame(clf, ds)
 
-    metrics = B.fit_and_measure(frame, p_ood=args.ood_rate, hazards=hazards)
+    utility = CA.PROFILES[args.profile]
+    if args.profile != "standard":
+        print(f"  note: utility profile {args.profile!r} -- wrong answers cost "
+              f"{utility['wrong']} against the default {CA.UTILITY['wrong']}. "
+              "Thresholds are fitted against these payoffs.", file=sys.stderr)
+    metrics = B.fit_and_measure(frame, p_ood=args.ood_rate, hazards=hazards,
+                                groups=gmap, utility=utility)
 
     if args.deployment_origin:
         if scored:
@@ -112,7 +119,7 @@ def cmd_audit(args):
 
     out = B.save_bundle(Path(args.out), clf, chosen, args.encoder_name, metrics,
                         comp, ds.counts, source=str(source), hazards=hazards,
-                        groups=gmap)
+                        groups=gmap, utility=utility)
     card_path = C.write(out)
     print(f"\nbundle {out}\ncard   {card_path}", file=sys.stderr)
     print(f"\n  coverage {100*metrics['coverage']:.1f}%  "
@@ -175,6 +182,12 @@ def main(argv=None):
                          help="the origin you will actually see, to measure what "
                               "it costs labels with no training rows from it "
                               "(--embeddings only)")
+    p_audit.add_argument("--profile", default="standard", choices=sorted(CA.PROFILES),
+                         help="declared utility profile. `wrong` is the stakes "
+                              "dial: identify -2, standard -4, conserve -6, "
+                              "forage -20. Payoffs are declared in source with "
+                              "reasons; this selects among them, it does not tune "
+                              "them.")
     p_audit.add_argument("--hazard", action="append", metavar="LABEL",
                          help="a label where being wrong is expensive; repeatable")
     p_audit.add_argument("--hazard-file", metavar="FILE",

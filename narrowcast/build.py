@@ -384,7 +384,7 @@ def _ci(numer, denom, clusters, n=2000, seed=0):
     return [float(np.percentile(out, 2.5)), float(np.percentile(out, 97.5))]
 
 
-def hazard_metrics(te, lv, hazards, seed=0) -> dict:
+def hazard_metrics(te, lv, hazards, seed=0, groups=None) -> dict:
     """For each consequential label: how often is it given a *non*-consequential name?
 
     This is the union over every wrong answer, and it is not optional. Measured on
@@ -405,7 +405,16 @@ def hazard_metrics(te, lv, hazards, seed=0) -> dict:
     if not hazards:
         return {}
     hz = set(hazards)
-    hz_groups = {h.split()[0] for h in hz}
+    # The caller's group map, not the first whitespace token. That default is a
+    # Latin-binomial convention and this is the fourth place it has been wrong --
+    # `labels.py:126` calls an earlier one "the third place this default has
+    # broken a non-binomial domain". It matters most here: a foraging list groups
+    # by *family*, so poison hemlock's group is `Apiaceae`, and deriving "Conium"
+    # from the name means the hazard's own group is never recognised. Every
+    # coarse answer then counts as dangerous, including the one that is actually
+    # a warning.
+    hz_groups = ({groups[h] for h in hz if h in groups} if groups
+                 else {h.split()[0] for h in hz})
     truth = te["truth"].to_numpy()
     pred = te["pred_label"].to_numpy()
     pgen = te["pred_group"].to_numpy()
@@ -415,6 +424,18 @@ def hazard_metrics(te, lv, hazards, seed=0) -> dict:
     for label in sorted(hz):
         m = truth == label
         if not m.any():
+            # A declared hazard with no test rows used to `continue`, so it
+            # vanished from the gate while the card counted the survivors and
+            # said "all N consequential labels are under the bar". With clustered
+            # splits over a large catalogue a rare hazard can disappear this way.
+            # Record it as unmeasured instead: absence of evidence is reported,
+            # not converted into a pass.
+            out[label] = {
+                "n": 0, "declined": None, "named_correctly": None,
+                "named_other_hazard": None, "named_non_hazard": None,
+                "ci": None, "unmeasured": True,
+                "ci_unavailable_reason": "no test rows for this label",
+            }
             continue
         # answered as something the user would treat as harmless
         sp_safe = named[m] & (pred[m] != label) & ~np.isin(pred[m], list(hz))
@@ -431,6 +452,7 @@ def hazard_metrics(te, lv, hazards, seed=0) -> dict:
             "named_other_hazard": float(wrong_haz.mean()),
             "named_non_hazard": float(wrong_safe.mean()),
             "ci": ci,
+            "unmeasured": False,
             # No interval when the catalogue offers no cluster inside one label:
             # its images are not grouped by individual plant, so a row-level
             # bootstrap would treat several photographs of one plant as
@@ -442,8 +464,19 @@ def hazard_metrics(te, lv, hazards, seed=0) -> dict:
 
 
 def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
-                    hazards=None) -> dict:
-    """Fit thresholds on a clustered calibration half, report on the other."""
+                    hazards=None, groups=None, utility=None) -> dict:
+    """Fit thresholds on a clustered calibration half, report on the other.
+
+    `groups` is the caller's label -> group map, needed by `hazard_metrics` so a
+    hazard's own group is recognised under a non-genus grouping.
+
+    `utility` overrides `cascade.UTILITY`. The override has always existed --
+    `utility()` merges it and `fit_thresholds()` threads it -- and nothing in the
+    package passed it, so the declared payoffs were effectively hard-coded. They
+    are still *declared*: a caller picks a profile written down in advance, which
+    is the discipline `CLAUDE.md` asks for. What it must never be is fitted to
+    the outcome.
+    """
     fold = make_splits(df, seed=seed)
     cal, te = df[fold == "calib"], df[fold == "test"]
     if cal.empty or te.empty:
@@ -464,7 +497,7 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     (tg, ts), _ = fit_thresholds(
         cal["label_conf"].to_numpy(), cal["group_conf"].to_numpy(),
         cal["label_ok"].to_numpy(), cal["group_ok"].to_numpy(),
-        cal["in_catalog"].to_numpy(), sample_weight=w_cal,
+        cal["in_catalog"].to_numpy(), sample_weight=w_cal, weights=utility,
     )
 
     # Headroom -- coarse-rank accuracy minus fine-rank accuracy -- governs whether
@@ -538,13 +571,13 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
         "ci": ci,
         "n_label_clusters": int(len(set(clusters[inc]))),
         "per_bucket": per_bucket,
-        "hazard": hazard_metrics(te, lv, hazards, seed=seed),
+        "hazard": hazard_metrics(te, lv, hazards, seed=seed, groups=groups),
         "n_calib": int(len(cal)), "n_test": int(len(te)),
     }
 
 
 def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
-                source: str, hazards=None, groups=None) -> Path:
+                source: str, hazards=None, groups=None, utility=None) -> Path:
     """Head weights, thresholds, and everything needed to reproduce the claim.
 
     `groups` is the label -> group map, and storing it is what makes `predict`
@@ -581,7 +614,12 @@ def save_bundle(out: Path, clf, chosen, encoder, metrics, composition, counts,
                         if k != "outside_siblings" and not k.startswith("_")},
         "outside_siblings": composition.get("outside_siblings", {}),
         "metrics": metrics,
-        "utility": UTILITY,
+        # The payoffs actually fitted against, not the module default. Recording
+        # UTILITY unconditionally would make the manifest lie about any bundle
+        # built with an overriding profile -- and the payoffs are the one input
+        # that must be legible after the fact, since they are what makes the
+        # thresholds reproducible rather than tuned.
+        "utility": {**UTILITY, **(utility or {})},
         "ood_mix": OOD_MIX,
         "groups": {str(k): str(v) for k, v in (groups or {}).items()},
     }
