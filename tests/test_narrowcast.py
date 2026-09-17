@@ -1148,3 +1148,190 @@ def test_card_fires_on_an_absent_hazard_over_the_bar():
         "warned_at_group": 0.0, "declined": 0.955}}))
     assert "⚠" in txt and "4.5%" in txt
     assert "--ood-rate" in txt
+
+
+# ---- a declared hazard must not reach the test half by coin flip -------------
+
+_HZ_GENERA = ["Conium", "Cicuta", "Daucus", "Anthriscus", "Foeniculum", "Heracleum",
+              "Pastinaca", "Torilis", "Osmorhiza", "Sanicula", "Angelica",
+              "Ligusticum", "Perideridia", "Cynoglossum", "Digitalis", "Aconitum",
+              "Delphinium", "Veratrum", "Nicotiana", "Datura", "Solanum",
+              "Ranunculus", "Aquilegia"]
+
+
+def _near_ood_frame(n_obs=6):
+    """The shape that produced the failure: 23 unlisted species, each its own
+    genus, in the bucket `make_splits` keys on the *group*. `label` is the
+    clustering id (one plant, several photographs), as it is in a real frame."""
+    rec = [{"bucket": "near_ood", "label": f"{g} sp1-obs{o}", "group": g,
+            "species": f"{g} sp1", "truth": build.OTHER, "in_catalog": False}
+           for g in _HZ_GENERA for o in range(n_obs) for _ in range(2)]
+    rec += [{"bucket": "in_catalog", "label": f"in{i}", "group": f"G{i % 5}",
+             "species": f"in{i}", "truth": f"in{i}", "in_catalog": True}
+            for i in range(20)]
+    return pd.DataFrame(rec)
+
+
+def _reaches(df, target, hazards, fold="test", seeds=8):
+    return sum(bool((cascade.make_splits(df, seed=s, hazards=hazards) == fold)[
+        df["species"] == target].any()) for s in range(seeds))
+
+
+def _e2e_frame(n_genera=12, n_obs=4):
+    """A frame `fit_and_measure` will accept, with enough near-OOD genera that the
+    genus-keyed shuffle can put any one of them wholly in the calibration half."""
+    rng = np.random.default_rng(0)
+    base = _cascade_frame(label_ok=True, group_ok=True)
+    base["pred_label"] = base["label"]
+    base["pred_group"] = base["group"]
+    base["truth"] = np.where(base["in_catalog"], base["label"], build.OTHER)
+    base["species"] = base["label"]
+    near = [{"label_conf": float(rng.uniform(0.0, 0.5)),
+             "group_conf": float(rng.uniform(0.0, 0.5)),
+             "label_ok": False, "group_ok": False, "in_catalog": False,
+             "bucket": "near_ood", "label": f"{g} sp1-obs{o}", "group": g,
+             "pred_label": "G0 sp0", "pred_group": "G0", "truth": build.OTHER,
+             "species": f"{g} sp1"}
+            for g in (["Conium"] + [f"Rel{i}" for i in range(n_genera - 1)])
+            for o in range(n_obs) for _ in range(2)]
+    return pd.concat([base, pd.DataFrame(near)], ignore_index=True)
+
+def test_an_undeclared_hazard_reaches_the_test_half_only_by_coin_flip():
+    """The failure this fixes, pinned so it cannot come back as a default. With
+    23 near-OOD genera no single one exceeds `MAX_CLUSTER_SHARE`, so `_too_coarse`
+    is content and the genus stays the key -- the shuffle then decides. Measured
+    on the real Oregon list: Conium in 6 of 8 splits, Cicuta in 2 of 8."""
+    df = _near_ood_frame()
+    assert 1 <= _reaches(df, "Conium sp1", hazards=None) <= 7
+
+
+def test_a_declared_hazard_lands_in_both_halves_at_every_seed():
+    """Not "usually measured". A card whose safety section depends on the seed is
+    a coin flip wearing a measurement's clothes."""
+    df = _near_ood_frame()
+    hz = {"Conium sp1", "Cicuta sp1"}
+    for target in hz:
+        assert _reaches(df, target, hz, fold="test") == 8
+        # calib too: forcing it wholly into test would pull negatives out of the
+        # calibration set, which is the mistake `load_scored` records as having
+        # silently broken a published table.
+        assert _reaches(df, target, hz, fold="calib") == 8
+
+
+def test_declaring_a_hazard_moves_no_other_row():
+    """Stratification draws from its own generator, so `--hazard` re-assigns that
+    hazard's rows and nothing else. Note the scope: *split assignment* is what is
+    stable. The thresholds fitted from it still move, because the hazard's own
+    rows changed sides and the calibration composition changed with them."""
+    df = _near_ood_frame()
+    hz = {"Conium sp1", "Cicuta sp1"}
+    other = ~df["species"].isin(hz).to_numpy()
+    for seed in range(8):
+        plain = cascade.make_splits(df, seed=seed)
+        with_hz = cascade.make_splits(df, seed=seed, hazards=hz)
+        assert (plain[other] == with_hz[other]).all()
+
+
+def test_one_hazards_halving_does_not_depend_on_another_being_declared():
+    """Each hazard is keyed on its own name, so declaring Cicuta cannot change
+    which of Conium's observations are held out."""
+    df = _near_ood_frame()
+    alone = cascade.make_splits(df, seed=0, hazards={"Conium sp1"})
+    with_other = cascade.make_splits(df, seed=0,
+                                     hazards={"Conium sp1", "Cicuta sp1"})
+    m = (df["species"] == "Conium sp1").to_numpy()
+    assert (alone[m] == with_other[m]).all()
+    assert set(alone[m]) == {"calib", "test"}
+
+
+def test_a_single_cluster_hazard_goes_wholly_to_test_rather_than_straddling():
+    """Cluster, never row -- the one convention that does not bend for this. All
+    its rows are one plant, so it is measured without an interval instead of
+    being split down the middle of a cluster."""
+    df = _near_ood_frame()
+    df.loc[df["species"] == "Cicuta sp1", "label"] = "Cicuta sp1-single"
+    fold = cascade.make_splits(df, seed=3, hazards={"Cicuta sp1"})
+    assert set(fold[df["species"] == "Cicuta sp1"]) == {"test"}
+
+
+def test_a_hazard_with_no_rows_leaves_the_split_untouched():
+    """Declaring a hazard the source never saw is not an error here -- the metrics
+    report it unmeasured. It must not perturb the split on the way."""
+    df = _near_ood_frame()
+    assert (cascade.make_splits(df, seed=0, hazards={"Not present"})
+            == cascade.make_splits(df, seed=0)).all()
+
+
+def test_both_threat_models_find_their_hazard_through_one_predicate():
+    """`hazard_metrics` keys on `truth`, `outside_hazard_metrics` on `species` and
+    out-of-list. A hazard stratified under one predicate and measured under the
+    other still reports "unmeasured", and the miss is invisible. One helper, used
+    by the split and by both metrics."""
+    df = pd.DataFrame({
+        "truth": ["Amanita phalloides", build.OTHER, build.OTHER],
+        "species": ["Amanita phalloides", "Conium maculatum", "Daucus carota"],
+        "in_catalog": [True, False, False],
+    })
+    assert list(cascade.hazard_rows(df, "Amanita phalloides")) == [True, False, False]
+    assert list(cascade.hazard_rows(df, "Conium maculatum")) == [False, True, False]
+
+
+def test_card_survives_an_unmeasured_consequential_label():
+    """`hazard_metrics` records a hazard with no test rows rather than dropping it
+    — and the section that reads those records compared `None > 0.01` and raised.
+    The crash was reachable from the exact case the recording exists for."""
+    from narrowcast.card import _hazard_section
+    txt = "\n".join(_hazard_section({
+        "Conium maculatum": {"n": 0, "declined": None, "named_correctly": None,
+                             "named_other_hazard": None, "named_non_hazard": None,
+                             "ci": None, "unmeasured": True},
+        "Cicuta douglasii": {"n": 40, "declined": 0.9, "named_correctly": 0.1,
+                             "named_other_hazard": 0.0, "named_non_hazard": 0.0,
+                             "ci": [0.0, 0.05], "unmeasured": False}}))
+    assert "Conium maculatum" in txt
+    assert "1 declared and not measured" in txt
+    # and it must not count the missing one among those that passed
+    assert "All 1 consequential labels are under" in txt
+
+
+def test_card_does_not_call_a_wholly_unmeasured_gate_a_pass():
+    from narrowcast.card import _hazard_section
+    txt = "\n".join(_hazard_section({"Conium maculatum": {
+        "n": 0, "named_non_hazard": None, "unmeasured": True}}))
+    assert "none of this was measured" in txt
+    assert "not a passed check" in txt
+
+
+def test_card_discloses_that_hazards_were_forced_into_both_halves():
+    """The bucket counts otherwise read as a plain sample, and after
+    stratification they are not one."""
+    man = _manifest(0.85)
+    man["metrics"]["per_bucket"]["near_ood"] = {
+        "n": 50, "answered": 0.2, "correct_when_answered": 0.5}
+    man["metrics"]["hazard_absent"] = {
+        "Conium maculatum": {"unmeasured": True, "n": 0, "dangerous": None}}
+    assert "forced into both halves" in card.render(man)
+    # and stays quiet when nothing was declared, because then it is a plain sample
+    assert "forced into both halves" not in card.render(_manifest(0.85))
+
+
+def test_a_declared_hazard_is_measured_end_to_end_at_every_seed():
+    """The whole point, through `fit_and_measure` rather than `make_splits`: the
+    stratified rows must land where the metric actually looks for them."""
+    df = _e2e_frame()
+    # Undeclared, the shuffle decides. Asserted first so that if the fixture ever
+    # stops being able to miss, this test fails loudly instead of passing vacuously.
+    def _missed(seed):
+        te = df[cascade.make_splits(df, seed=seed) == "test"]
+        lv = np.full(len(te), build.DECLINE)
+        return build.outside_hazard_metrics(te, lv, {"Conium sp1"}
+                                            )["Conium sp1"]["unmeasured"]
+
+    assert any(_missed(s) for s in range(6)), \
+        "the unstratified split never missed it; nothing is pinned"
+
+    for seed in range(6):
+        m = build.fit_and_measure(df, p_ood=0.2, seed=seed,
+                                  hazards_absent=["Conium sp1"])
+        assert m["hazard_absent"]["Conium sp1"]["unmeasured"] is False, seed
+        assert m["hazard_absent"]["Conium sp1"]["n"] > 0

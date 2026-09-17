@@ -80,8 +80,11 @@ def _absent_hazard_section(hz: dict) -> list:
     unmeasured = [k for k, v in hz.items() if v.get("unmeasured")]
     if unmeasured:
         L += ["", f"**{len(unmeasured)} declared and not measured** (no rows): "
-                  + ", ".join(sorted(unmeasured)) + ". Fetch data for them or "
-                  "stop declaring them; an unmeasured hazard is not a safe one."]
+                  + ", ".join(sorted(unmeasured)) + ". Declared hazards are forced "
+                  "into both halves of the split, so this means the source holds "
+                  "no rows for them at all, not that the shuffle missed them. "
+                  "Fetch data for them or stop declaring them; an unmeasured "
+                  "hazard is not a safe one."]
     return L
 
 
@@ -96,10 +99,22 @@ def _hazard_section(hz: dict) -> list:
     """
     if not hz:
         return []
-    worst = max(v["named_non_hazard"] for v in hz.values())
-    fails = [k for k, v in hz.items() if v["named_non_hazard"] > HAZARD_BAR]
-
+    # `hazard_metrics` records a hazard with no test rows as unmeasured rather
+    # than dropping it -- dropping it once let the card count the survivors and
+    # announce "all N are under the bar". Its rates are `None`, so everything
+    # that compares them has to exclude it first; this section used to raise a
+    # TypeError on the very record the other fix added.
+    measured = {k: v for k, v in hz.items() if not v.get("unmeasured")}
     L = ["## Consequential labels", ""]
+    if not measured:
+        L += ["No test rows for any of them, so **none of this was measured**. A "
+              "declared consequential label with no data is not a passed check.", ""]
+        for k in sorted(hz):
+            L.append(f"- **{k}** — not measured")
+        return L
+    worst = max(v["named_non_hazard"] for v in measured.values())
+    fails = [k for k, v in measured.items() if v["named_non_hazard"] > HAZARD_BAR]
+
     if fails:
         L += [f"> ### ⚠ Do not rely on this model for {len(fails)} of "
               f"{len(hz)} consequential labels",
@@ -112,7 +127,7 @@ def _hazard_section(hz: dict) -> list:
               f"at lower coverage answers less and is wrong less. Rebuild with a "
               f"higher `--ood-rate`, or treat these labels as always-decline.", ""]
     else:
-        L += [f"All {len(hz)} consequential labels are under the "
+        L += [f"All {len(measured)} consequential labels are under the "
               f"{_pct(HAZARD_BAR)} bar; worst case {_pct(worst)}.", ""]
 
     L += ["The number that matters is **named as something harmless** — the union "
@@ -124,7 +139,11 @@ def _hazard_section(hz: dict) -> list:
           "| label | n | correct | declined | named as another consequential label | "
           "**named as something harmless** | 95% CI |",
           "|---|---|---|---|---|---|---|"]
-    for k, v in sorted(hz.items(), key=lambda kv: -kv[1]["named_non_hazard"]):
+    for k, v in sorted(hz.items(),
+                       key=lambda kv: -(kv[1]["named_non_hazard"] or -1)):
+        if v.get("unmeasured"):
+            L.append(f"| **{k}** | 0 | — | — | — | — | — |")
+            continue
         ci = v.get("ci")
         cis = "—" if not ci else f"{100*ci[0]:.1f}–{100*ci[1]:.1f}%"
         mark = " ⚠" if v["named_non_hazard"] > HAZARD_BAR else ""
@@ -132,7 +151,14 @@ def _hazard_section(hz: dict) -> list:
                  f"{_pct(v['declined'])} | {_pct(v['named_other_hazard'])} | "
                  f"**{_pct(v['named_non_hazard'])}**{mark} | {cis} |")
     L.append("")
-    if any(not v.get("ci") for v in hz.values()):
+    unmeasured = [k for k, v in hz.items() if v.get("unmeasured")]
+    if unmeasured:
+        L += [f"**{len(unmeasured)} declared and not measured** (no test rows): "
+              + ", ".join(sorted(unmeasured)) + ". Declared hazards are forced "
+              "into both halves of the split, so this means the source holds no "
+              "rows for them at all, not that the shuffle missed them. An "
+              "unmeasured hazard is not a safe one.", ""]
+    if any(not v.get("ci") for v in measured.values()):
         L += ["_No interval where the data offers no grouping inside a single "
               "label — these rows are not grouped by subject, and a "
               "row-level interval would treat several rows of one subject as "
@@ -465,6 +491,18 @@ def render(manifest: dict) -> str:
         L.append(f"| {labels.get(b, b)} | {v['n']} | {_pct(v['answered'])} | "
                  f"{_pct(v['correct_when_answered'])} |")
     L.append("")
+    # Stratifying a declared hazard puts it in the test half at every seed, which
+    # is the point -- and it also over-represents it here relative to how often it
+    # was sampled. With a handful of hazards among many out-of-list species the
+    # effect is small, but this table otherwise reads as a plain sample and the
+    # reader has no way to know it is not one.
+    # Keyed on the measurements, not on `manifest["hazards"]`: that key records
+    # only the in-list declarations, and the absent ones are stratified too.
+    if m.get("hazard") or m.get("hazard_absent"):
+        L += ["_Declared hazards are forced into both halves of the split so a "
+              "single audit cannot miss one by shuffle. They are therefore "
+              "slightly over-represented in these bucket counts relative to how "
+              "often the source sampled them._", ""]
 
     oc = manifest.get("outside_siblings") or {}
     if oc:

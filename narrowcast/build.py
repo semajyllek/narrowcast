@@ -40,6 +40,7 @@ from narrowcast.cascade import (
     deployment_weights,
     fit_thresholds,
     group_matrix,
+    hazard_rows,
     make_splits,
 )
 from narrowcast.labels import group_of
@@ -425,14 +426,13 @@ def hazard_metrics(te, lv, hazards, seed=0, groups=None) -> dict:
     # a warning.
     hz_groups = ({groups[h] for h in hz if h in groups} if groups
                  else {h.split()[0] for h in hz})
-    truth = te["truth"].to_numpy()
     pred = te["pred_label"].to_numpy()
     pgen = te["pred_group"].to_numpy()
     named = lv == LABEL
     group_only = (lv != LABEL) & (lv != DECLINE)
     out = {}
     for label in sorted(hz):
-        m = truth == label
+        m = hazard_rows(te, label)
         if not m.any():
             # A declared hazard with no test rows used to `continue`, so it
             # vanished from the gate while the card counted the survivors and
@@ -498,24 +498,25 @@ def outside_hazard_metrics(te, lv, hazards, groups=None, seed=0) -> dict:
     contain the hazard, which is why `groups` matters here as much as it does in
     `hazard_metrics`.
 
-    Rows are found by the *clustering* column, which holds an out-of-list row's
-    real species name -- `truth` is `OTHER` for all of them by construction.
+    Rows are found by `cascade.hazard_rows`, shared with `hazard_metrics` and with
+    the split itself. Here it is the `species` column that matches, holding an
+    out-of-list row's real name -- `truth` is `OTHER` for all of them by
+    construction, so the predicate this function needs is not the one the in-list
+    case needs, and `make_splits` has to stratify on both.
     """
     if not hazards:
         return {}
     hz = set(hazards)
     hz_groups = ({groups[h] for h in hz if h in groups} if groups
                  else {h.split()[0] for h in hz})
-    real = te["species"].to_numpy()          # the real species, even out-of-list
     pgen = te["pred_group"].to_numpy()
     pred = te["pred_label"].to_numpy()
-    in_cat = te["in_catalog"].to_numpy()
     named = lv == LABEL
     group_only = (lv != LABEL) & (lv != DECLINE)
 
     out = {}
     for label in sorted(hz):
-        m = (real == label) & ~in_cat
+        m = hazard_rows(te, label)
         if not m.any():
             out[label] = {"n": 0, "declined": None, "named_in_list": None,
                           "warned_at_group": None, "dangerous": None,
@@ -559,7 +560,11 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     is the discipline `CLAUDE.md` asks for. What it must never be is fitted to
     the outcome.
     """
-    fold = make_splits(df, seed=seed)
+    # Both threat models' hazards, because `make_splits` stratifies on the union
+    # and measuring a hazard the split never routed into the test half reports it
+    # as "unmeasured" -- which is the honest answer to the wrong question.
+    declared = set(hazards or []) | set(hazards_absent or [])
+    fold = make_splits(df, seed=seed, hazards=declared)
     cal, te = df[fold == "calib"], df[fold == "test"]
     if cal.empty or te.empty:
         raise ValueError("calibration or test split is empty; too few observations")

@@ -21,6 +21,8 @@ down why -- a utility silently tuned against a test set is the failure mode the
 whole design exists to prevent.
 """
 
+import zlib
+
 import numpy as np
 import pandas as pd
 
@@ -167,7 +169,34 @@ def _too_coarse(group, key) -> bool:
     return float(group[key].value_counts().iloc[0]) / len(group) > MAX_CLUSTER_SHARE
 
 
-def make_splits(df, seed=0):
+def hazard_rows(df, hazard):
+    """Mask of the rows a declared hazard owns, under *either* threat model.
+
+    `build.hazard_metrics` keys on `truth`, because a listed hazard is a label the
+    model can name. `build.outside_hazard_metrics` keys on `species` and
+    out-of-list, because a forager's hazard is absent from the label set by design
+    and its `truth` is `OTHER` for every row it has.
+
+    The two must disagree, because `species` is not one thing across the source
+    paths: `load_scored` sets it to the real label, `load_embeddings` to the
+    clustering id. So the union lives here, once. A hazard stratified into the
+    test half under one predicate and then measured under the other would still be
+    reported *unmeasured* -- and unmeasured is the outcome the stratification
+    exists to stop, so the miss would be invisible in exactly the place the card
+    promises to be loud.
+    """
+    m = np.zeros(len(df), bool)
+    if "truth" in df:
+        m |= df["truth"].to_numpy() == hazard
+    if "species" in df:
+        s = df["species"].to_numpy() == hazard
+        if "in_catalog" in df:
+            s &= ~df["in_catalog"].to_numpy().astype(bool)
+        m |= s
+    return m
+
+
+def make_splits(df, seed=0, hazards=None):
     """Assign 'calib'/'test' per row, splitting on the cluster for each bucket.
 
     Clustered because ~6 observations share a species and species difficulty is
@@ -186,6 +215,36 @@ def make_splits(df, seed=0):
     is rejected in favour of the finest identity that still prevents leakage: the
     real species. Counting clusters is not enough -- five families sounds like
     plenty and still puts a third of the bucket in one of them.
+
+    **Declared hazards are stratified rather than shuffled.** Everything above
+    resamples whole clusters, which is right on average and wrong for the one
+    label a caller has told us they are afraid of. With the 23 near-OOD species of
+    an Oregon foraging list, `near_ood` keys on the genus, each hazard is its own
+    genus, and reaching the test half is a coin flip per seed: *Conium* made it in
+    6 of 8 splits and *Cicuta* in 2 of 8. The card reports the misses honestly as
+    unmeasured -- but a single audit then decides by shuffle whether the declared
+    hazard was checked at all, which is not a property a safety report may have.
+
+    So each hazard's own rows are re-assigned after the bucket loop, halved at the
+    *cluster* identity so several photographs of one plant still cannot straddle
+    the split. This deliberately breaks the whole-genus rule for that one genus:
+    the hazard is by declaration the thing being measured, not a member of the
+    background it was drawn from. `MAX_CLUSTER_SHARE` does not reach this -- with
+    23 genera no single one exceeds 0.34, so `_too_coarse` is content and the coin
+    flip survives.
+
+    A hazard with a single cluster goes wholly to `test`, because halving it would
+    straddle a cluster and that is the convention that does not bend. It loses its
+    interval, and `_ci` already reports that as "no cluster within a single label"
+    rather than inventing one.
+
+    The cost is real and worth stating: a hazard that the shuffle happened to send
+    wholly to `test` now has about half as many test rows, so its interval widens.
+    That is the trade -- a wider interval on every audit, against a point estimate
+    that exists on only some of them. Sending it wholly to `test` instead would
+    keep the rows and pull negatives out of the calibration set, which is the
+    mistake `build.load_scored` records as having silently broken a published
+    table.
     """
     rng = np.random.RandomState(seed)
     fold = pd.Series("test", index=df.index, dtype=object)
@@ -198,6 +257,31 @@ def make_splits(df, seed=0):
         rng.shuffle(clusters)
         calib = set(clusters[: len(clusters) // 2])
         fold[group.index[group[key].isin(calib)]] = "calib"
+
+    # Each hazard draws from its own generator, keyed on the seed and on its own
+    # name, so its halving depends on neither the bucket shuffle nor on what else
+    # was declared. Sharing `rng` would let adding `--hazard` move the whole
+    # split; sharing one stream across this loop would make Conium's halves
+    # depend on whether Cicuta was also named.
+    #
+    # What this does *not* buy is comparable headline numbers. A declared hazard's
+    # rows move between the halves, the calibration set's composition changes with
+    # them, and `fit_thresholds` therefore returns a different operating point --
+    # on the fixture in the tests, up to 8 points of label share. Only the split
+    # assignment is stable; anything fitted from it is not.
+    for hazard in sorted(hazards or []):
+        m = hazard_rows(df, hazard)
+        if not m.any():
+            continue
+        clusters = np.array(sorted(df.loc[m, "label"].unique()))
+        if len(clusters) < 2:
+            fold[df.index[m]] = "test"
+            continue
+        hz_rng = np.random.RandomState([seed, zlib.crc32(hazard.encode()) % 2**31])
+        hz_rng.shuffle(clusters)
+        to_calib = m & df["label"].isin(clusters[: len(clusters) // 2]).to_numpy()
+        fold[df.index[to_calib]] = "calib"
+        fold[df.index[m & ~to_calib]] = "test"
     return fold
 
 
