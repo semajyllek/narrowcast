@@ -1991,3 +1991,22 @@ def test_relabelling_a_bucket_does_not_change_the_split_at_all():
     # and a rename that genuinely changes the split *key* is allowed to differ:
     # `near_ood` clusters on the group, `regional_ood` on the label
     assert cascade.SPLIT_CLUSTER["near_ood"] != cascade.SPLIT_CLUSTER["regional_ood"]
+
+
+def test_adding_a_row_to_one_bucket_leaves_the_other_buckets_alone():
+    """Locality, which is the property the content key actually buys. The bucket
+    that gained a row reshuffles completely and that is fine — its data changed.
+    The ones that did not gain a row must not move, and under the shared stream
+    every one of them did."""
+    f = _e2e_frame()
+    n = len(f)
+    grown = pd.concat([f, f.iloc[[0]].assign(label="G0 sp0-EXTRA")],
+                      ignore_index=True)
+    base, after = cascade.make_splits(f, seed=0), cascade.make_splits(grown, seed=0)
+    changed = f.iloc[0]["bucket"]
+    for b in sorted(set(f["bucket"])):
+        m = (f["bucket"] == b).to_numpy()
+        agree = (base[m].values == after[:n][m].values).mean()
+        if b == changed:
+            continue
+        assert agree == 1.0, f"{b} moved when only {changed} gained a row"

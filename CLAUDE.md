@@ -1,7 +1,7 @@
 # narrowcast — orientation for a new session
 
 **Audit a classifier over a narrow label set, and the truth about how it will
-fail.** Public, MIT, pip-installable, 141 tests, CI on 3.10/3.12/3.13.
+fail.** Public, MIT, pip-installable, 142 tests, CI on 3.10/3.12/3.13.
 
 Extracted from [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid), which remains
 the research record — **every number in the README traces to a findings doc
@@ -102,7 +102,10 @@ why. We measured someone else's model; we did not obtain a copy of it.
   and `near_ood` as a side effect — 12 points of coverage on real Oregon data, from
   a relabelling. Keyed on the name that side effect goes but the renamed bucket
   still resplits. Keyed on the clusters it actually holds, identical rows give an
-  identical split whatever the bucket is called. Pinned by a test. A rename that
+  identical split whatever the bucket is called. Pinned by two tests. What this buys is **locality, not stability**: adding one
+  row still reshuffles its own bucket (0.50 agreement, chance) because its data
+  really did change, but the buckets that did not change now sit at 1.000 where
+  the shared stream moved all of them. A rename that
   changes the split *key* (`near_ood` clusters on the group, the others on the
   label) is still allowed to differ, because then the data really did change.
 - **`regional_ood` is the caller's to declare and is never derived.** An optional

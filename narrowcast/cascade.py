@@ -407,8 +407,14 @@ def make_splits(df, seed=0, hazards=None):
         # points on one seed. Keyed on the name, that side effect goes but the
         # renamed bucket still resplits, so a pure relabelling still moves the
         # headline. Keyed on contents, identical rows give an identical split
-        # whatever the bucket is called, and the split depends only on things a
-        # split should depend on.
+        # whatever the bucket is called.
+        #
+        # What this buys is **locality, not stability**. Adding one row still
+        # reshuffles its own bucket completely -- measured at 0.50 agreement,
+        # no better than chance -- because the fingerprint changes. That is
+        # defensible: that bucket's data did change. What it no longer does is
+        # disturb the buckets that did not change, which sit at 1.000. The
+        # shared stream disturbed every one of them.
         fingerprint = zlib.crc32("\x00".join(clusters.tolist()).encode()) % 2**31
         rng = np.random.RandomState([seed, fingerprint])
         rng.shuffle(clusters)
