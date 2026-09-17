@@ -1,7 +1,7 @@
 # narrowcast — orientation for a new session
 
 **Audit a classifier over a narrow label set, and the truth about how it will
-fail.** Public, MIT, pip-installable, 77 tests, CI on 3.10/3.12/3.13.
+fail.** Public, MIT, pip-installable, 111 tests, CI on 3.10/3.12/3.13.
 
 Extracted from [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid), which remains
 the research record — **every number in the README traces to a findings doc
@@ -35,11 +35,11 @@ So no report ever prints coverage without the label-level share beside it.
 | module | does only |
 |---|---|
 | `sources.py` | embeddings / scores → `Rows`. **The tool never fetches and never encodes.** |
-| `cascade.py` | label/group/decline, declared `UTILITY`, threshold fitting, clustered splits, cluster bootstrap |
+| `cascade.py` | label/group/decline, declared `UTILITY`, threshold fitting, clustered splits with declared hazards stratified into both halves, per-label `suppress`, cluster bootstrap |
 | `build.py` | head (embeddings path only), per-row scores, measurement, hazard union, bundle |
-| `card.py` | the report, the consequential-label gate, and the origin-composition section |
+| `card.py` | the report, the consequential-label gate, what a suppression cost, and the origin-composition section |
 | `labels.py` | label-list parsing and composition analysis |
-| `predict.py` | run a bundle *this tool fitted*; refuses an audit bundle by name |
+| `predict.py` | run a bundle *this tool fitted*, under the same suppression the card was measured with; refuses an audit bundle by name |
 | `cli.py` | `audit` / `card` / `predict` |
 
 **One measurement path, deliberately.** `build.score_frame` delegates to
@@ -57,12 +57,25 @@ why. We measured someone else's model; we did not obtain a copy of it.
 - **Cluster, never row.** Splits and bootstraps resample the *subject* (several
   photos of one plant). Row-level intervals have twice produced effects that
   failed to replicate.
+  **With one declared exception**: a hazard named by `--hazard` or
+  `--hazard-absent` is stratified into *both* halves, halved at the cluster. This
+  breaks the whole-genus rule for that one genus on purpose — the hazard is the
+  thing being measured, not a member of the background it came from. Without it,
+  reaching the test half was a coin flip per seed (Conium 6 of 8 splits, Cicuta 2
+  of 8) and a safety report decided by shuffle whether it checked anything. The
+  cluster itself is still never split: a single-cluster hazard goes wholly to
+  test and loses its interval instead.
 - **Bootstrap the ratio, not the mean.** Coverage and precision are
   prevalence-weighted; bootstrapping the unweighted mean of the same rows once
   gave a 22–77% interval around a 96.1% point estimate.
 - **Declare utilities before fitting.** `cascade.UTILITY` is fixed in source.
   Changing it is a deliberate act with a written reason.
 - **Refuse rather than mislead.** `audit` exits on a source with no in-list rows.
+  `--never-answer` refuses a label that is *not* on the list (you can only
+  suppress what the model can emit) and refuses to suppress all of them;
+  `fit_and_measure` refuses `never_answer` without `labels`, because without the
+  label set it would suppress label answers only while `predict` also suppresses
+  hollow-group ones — two different models out of one bundle.
   `predict` refuses an audit bundle by name instead of failing on a missing
   `head.npz`. `--deployment-origin` prints that it was *not measured* under
   `--scores` rather than reporting a silent null — it refits a head twice and
@@ -84,6 +97,18 @@ why. We measured someone else's model; we did not obtain a copy of it.
 - BSD `sed` does not support `\b`, which silently half-completed a bulk rename.
 - `git merge -F -` does not read stdin; it fails and a following `push` succeeds
   as a no-op.
+- **Suppressing the hazard instead of the look-alike measures nothing.**
+  `--never-answer` exists to make the model cautious about one thing, and the
+  thing to name is the *harmless* label the hazard gets called — the wild carrot,
+  not the hemlock. Suppressing the hazard looks obviously right and is inert:
+  `hazard_metrics` counts rows whose prediction is *not* the hazard, so rows whose
+  argmax is the hazard were never in the numerator. Suppress it and they move
+  LABEL → DECLINE, the rate is unchanged, and `named_correctly` goes to zero —
+  same danger, less utility. The card used to recommend exactly this.
+- **The suppression is applied after the fit, never inside it.** Thresholds are
+  fitted as though nothing were suppressed, which is what makes the override's
+  cost a delta the card can print. Folding it into `fit_thresholds` would absorb
+  that number into the operating point and delete it.
 - **`deployment_weights` renormalises around an absent bucket.** A source with no
   in-pool relatives has no `near_ood`, so its 0.32 share went unclaimed and
   `--ood-rate 0.2` scored at an effective **0.145** — while the card printed "an

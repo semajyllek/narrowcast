@@ -636,6 +636,17 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     # is kept out of `fit_thresholds`: leaving it out is what makes its cost a
     # measurable delta rather than something the operating point absorbs.
     lv_open = decide(te["label_conf"].to_numpy(), te["group_conf"].to_numpy(), tg, ts)
+    if never_answer and not labels:
+        # Without the label set `_group_members` is None, so the measurement would
+        # suppress label answers only while `Bundle.predict` — which always builds
+        # the members from its own classes — also kills hollow-group answers. Two
+        # different models from one bundle, which is the single invariant this
+        # tool will not break. Refuse rather than degrade.
+        raise ValueError(
+            "never_answer needs `labels` (the label set the model can emit). "
+            "Without it a group answer whose group holds nothing but suppressed "
+            "labels cannot be recognised, and the measurement would describe a "
+            "model that `predict` does not run.")
     lv = lv_open if not never_answer else suppress(
         lv_open, te["pred_label"].to_numpy(), never_answer,
         te["pred_group"].to_numpy(), _group_members(labels, groups))

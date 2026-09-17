@@ -1454,13 +1454,33 @@ def test_a_bundle_predicts_under_the_suppression_the_card_was_measured_with(tmp_
     assert any("suppressed at predict time" in n for n in b.notes)
 
 
-def test_cli_refuses_to_suppress_a_label_that_is_not_on_the_list():
+def test_cli_refuses_to_suppress_a_label_that_is_not_on_the_list(tmp_path):
     """You can only suppress what the model can emit. The sibling flags refuse
     their own wrong side too — a flag that silently does nothing is worse than one
-    that will not start."""
+    that will not start.
+
+    A real source file, so the run reaches the validation rather than dying on the
+    npz and passing for the wrong reason."""
     import subprocess, sys as _sys
-    r = subprocess.run([_sys.executable, "-m", "narrowcast.cli", "audit",
-                        "--scores", "/nonexistent.npz", "--out", "/tmp/x",
-                        "--never-answer", "Conium maculatum"],
-                       capture_output=True, text=True)
-    assert r.returncode != 0
+    f, classes = _scores_npz(tmp_path, ood=4)
+    def run(label):
+        return subprocess.run(
+            [_sys.executable, "-m", "narrowcast.cli", "audit", "--scores", str(f),
+             "--out", str(tmp_path / "b"), "--never-answer", label],
+            capture_output=True, text=True)
+
+    bad = run("Conium maculatum")
+    assert bad.returncode != 0
+    assert "not in the label set" in bad.stderr
+
+    ok = run(str(classes[0]))
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_measuring_a_suppression_without_the_label_set_is_refused():
+    """`_group_members` needs the label set; without it the measurement suppresses
+    label answers only while `predict` also kills hollow-group answers — two
+    different models from one bundle."""
+    df = _e2e_frame()
+    with pytest.raises(ValueError, match="needs `labels`"):
+        build.fit_and_measure(df, p_ood=0.2, never_answer=["G0 sp0"])
