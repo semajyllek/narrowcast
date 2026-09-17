@@ -1,7 +1,7 @@
 # narrowcast — orientation for a new session
 
 **Audit a classifier over a narrow label set, and the truth about how it will
-fail.** Public, MIT, pip-installable, 134 tests, CI on 3.10/3.12/3.13.
+fail.** Public, MIT, pip-installable, 137 tests, CI on 3.10/3.12/3.13.
 
 Extracted from [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid), which remains
 the research record — **every number in the README traces to a findings doc
@@ -81,18 +81,20 @@ why. We measured someone else's model; we did not obtain a copy of it.
   `--scores` rather than reporting a silent null — it refits a head twice and
   there is no head. `--background-embeddings` is rejected under `--scores`
   instead of ignored, because the negatives are already in the file.
-- **The embedding-space check warns; it does not refuse, and it is unvalidated.**
-  `build.check_same_space` refuses two vector pools of different width, because
-  that is proof. It only *warns* when the two look mutually orthogonal, even
-  though that is the real failure — a bundle embedded with a Core ML export
-  measured against a torch-embedded background pool, which flattered label share
-  by three points in silence. The geometry test rests on the premise that one
-  encoder's embeddings share a common cone, and nothing in this package can load
-  an encoder to check that; on synthetic vectors with independently drawn
-  centroids it false-positives. Refusing on an untested premise is the mistake
-  this project has recorded twice. **A domain repo with real encoders should
-  measure the false-positive rate on real pairs** — that is what would justify
-  promoting it to a refusal.
+- **The embedding-space check is blind to the failure it was written for.**
+  Measured in narrowcast-plantid's `SPACE_CHECK_FINDINGS.md` over 13 encoder
+  variants on the same photographs: the geometry test catches 74 of 105
+  different-family pairs, **0 of 21** export/quantization pairs, and
+  false-positives on 2 of 39 same-encoder pairs. The 0 of 21 includes the exact
+  recorded failure — torch BioCLIP-2 against its Core ML int4 export, cross-pool
+  cosine 0.79–0.82 at every organ. A faithful export lands in nearly the same
+  space, and no threshold separates the cases. So it warns, names its own rates,
+  and says what it cannot see. **Do not promote it to a refusal**; that was tried
+  and its own first fixture false-positived.
+  What catches the real thing is **declaration**: both npz files naming their
+  `encoder`, compared and refused on mismatch. narrowcast cannot verify either
+  claim and does not try — comparing two declarations is strictly better than
+  comparing none.
 - **`regional_ood` is the caller's to declare and is never derived.** An optional
   `regional` boolean column marks which out-of-list rows the deployment could
   plausibly be shown. With it present the mix becomes `OOD_MIX_REGIONAL` and the

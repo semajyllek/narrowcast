@@ -117,52 +117,64 @@ def space_coherence(X, centroid) -> float:
     return float((X @ c.T).mean())
 
 
-def check_same_space(fg, bg, what="the background pool"):
-    """Two vector pools that cannot have come from one encoder.
+def check_same_space(fg, bg, what="the background pool", declared=None):
+    """Two vector pools that may not have come from one encoder.
 
-    The failure this exists for was silent and cost three points: a bundle
-    embedded with a Core ML export was measured against a background pool embedded
-    with the torch original, and the negatives -- living in an unrelated space --
-    were trivially rejected, so label share came out flattered. Nothing errored,
-    and the number went into a table. `manifest["encoder"]` cannot catch it: it is
-    a string the caller declares, and both pools carry the same model name.
+    **Measured, and it does not do the job it was written for.** Against 13 real
+    encoder variants over the same photographs (narrowcast-plantid's
+    `SPACE_CHECK_FINDINGS.md`):
 
-    **A dimension mismatch is refused. Orthogonal geometry is only warned about**,
-    and the asymmetry is deliberate. Different widths are proof. The geometry test
-    rests on a premise -- that embeddings from one encoder share a common cone, so
-    a cross-pool cosine near zero means two encoders -- which holds for every real
-    contrastive encoder the authors have seen and is **not validated here**, since
-    nothing in this package can load one. On synthetic vectors with independently
-    drawn class centroids it false-positives, because such vectors share no cone
-    to begin with. Refusing on an untested premise would be the mistake this
-    project has already recorded twice: a partial measurement read as a verdict.
+    - **0 of 21** pairs that are an export or quantization of one model are
+      caught -- including the exact recorded failure, torch BioCLIP-2 against its
+      Core ML int4 export, at all three organs. Their cross-pool cosine is
+      0.79-0.82, nowhere near zero: a faithful export lands in nearly the same
+      space, which is what makes it faithful.
+    - **74 of 105** pairs from different model families are caught (0.705).
+    - **2 of 39** same-encoder pairs *false*-positive, on `plantclef24` bark
+      against flower and leaf -- subject matter alone, no encoder change.
 
-    So: returns a list of notes, and raises only on the certain case. A domain
-    repo that *does* have encoders should measure the false-positive rate on real
-    pairs; until then this stays a warning.
+    So the geometry test detects an unrelated encoder family about seven times in
+    ten and a wrong *export* never, while refusing roughly one legitimate pair in
+    twenty. It stays a warning, its description says what it actually detects, and
+    it is **not** the answer to the recorded failure.
+
+    `declared` is. When both npz files name the encoder that produced them, a
+    mismatch is caught exactly and cheaply -- narrowcast cannot verify the claim,
+    but comparing two declarations is strictly better than comparing none, and it
+    is the only thing here that sees a Core ML export against its original.
     """
+    notes = []
     if fg is None or bg is None or len(fg) == 0 or len(bg) == 0:
-        return []
+        return notes
+    if declared and len(set(declared)) > 1:
+        a, b = declared
+        raise SystemExit(
+            f"your rows declare encoder {a!r} and {what} declares {b!r}. "
+            "These are different models, and mixing them is the failure this "
+            "check exists for: it cost three points of label share once, "
+            "silently. Re-embed both with one encoder, or correct the "
+            "declaration if it is wrong.")
     if fg.shape[1] != bg.shape[1]:
         raise SystemExit(
             f"{what} has {bg.shape[1]}-dimensional vectors and your rows have "
             f"{fg.shape[1]}. These cannot be from one encoder.")
     d = fg.shape[1]
     if d < MIN_SPACE_CHECK_DIM:
-        return []
+        return notes
     bound = ORTHOGONAL_Z / np.sqrt(d)
     within = min(space_coherence(fg, fg.mean(0)), space_coherence(bg, bg.mean(0)))
     cross = space_coherence(bg, fg.mean(0))
     if abs(cross) < bound <= within:
-        return [f"{what} may not live in the same embedding space as your rows: "
-                f"mean cosine across the two pools is {cross:+.4f}, "
-                f"indistinguishable from unrelated (|cos| < {bound:.4f} at "
-                f"D={d}), while within each pool it is {within:.4f}. Two "
-                f"encoders, or one encoder and an export of it, would look like "
-                f"this -- and so would genuinely unrelated subject matter. Worth "
-                f"checking: negatives in an unrelated space are trivially "
-                f"rejected and label share comes out flattered, which is silent."]
-    return []
+        notes.append(
+            f"{what} looks like it came from an unrelated encoder: mean cosine "
+            f"across the two pools is {cross:+.4f}, indistinguishable from "
+            f"unrelated (|cos| < {bound:.4f} at D={d}), while within each pool it "
+            f"is {within:.4f}. Measured detection for that case is 0.705, with a "
+            f"0.051 false-positive rate on one encoder over different subject "
+            f"matter — so check rather than assume. Note this test does NOT see "
+            f"an export or quantization of your own encoder (0 of 21 caught); "
+            f"name the encoder in both files to catch that.")
+    return notes
 
 
 def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dataset:
@@ -204,7 +216,9 @@ def load_rows(rows, encoder_variant: str, background=None, seed: int = 0) -> Dat
 
     if background is not None:
         B = _vecs(background)
-        notes += check_same_space(X, B)
+        declared = [e for e in (getattr(rows, "encoder", None),
+                                getattr(background, "encoder", None)) if e]
+        notes += check_same_space(X, B, declared=declared if len(declared) == 2 else None)
         cut = rng.permutation(len(B))
         n = int(BG_TRAIN_FRAC * len(B))
         Xtr.append(B[cut[:n]]); ytr.append(np.full(n, OTHER))

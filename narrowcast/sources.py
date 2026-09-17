@@ -55,6 +55,11 @@ class Rows:
     classes: np.ndarray | None = None   # column order of `proba`
     # Which out-of-list rows are deployment-plausible. See `from_scores`.
     regional: np.ndarray | None = None
+    # What produced these vectors, if the file says. narrowcast cannot verify it
+    # and does not try; it compares two declarations, which is the only thing that
+    # catches a Core ML export measured against its own torch original -- the
+    # geometry test provably cannot (0 of 21, `build.check_same_space`).
+    encoder: str | None = None
 
     def __len__(self):
         return len(self.label)
@@ -143,6 +148,9 @@ def from_embeddings(path) -> Rows:
                    origin=z["origin"] if "origin" in z.files else None,
                    notes=[f"{len(z['descriptor'])} precomputed embeddings from {Path(path).name}"])
     r.regional = _regional(z)
+    if "encoder" in z.files:
+        r.encoder = str(np.asarray(z["encoder"]).ravel()[0])
+        r.notes.append(f"file declares encoder {r.encoder!r}")
     return r
 
 

@@ -1814,7 +1814,7 @@ def test_predict_flags_vectors_from_another_space(tmp_path):
     rng = np.random.default_rng(1)
     rot, _ = np.linalg.qr(rng.normal(size=(256, 256)))
     b.predict(np.asarray(ds.X_eval @ rot, dtype="float32"))
-    assert any("same embedding space" in n for n in b.space_warning)
+    assert any("unrelated encoder" in n for n in b.space_warning)
 
 
 def test_a_flagged_regional_row_moves_the_mix_to_the_deployment_realistic_one():
@@ -1876,7 +1876,7 @@ def test_predict_warns_on_raw_unnormalised_vectors_from_another_space(tmp_path):
     rng = np.random.default_rng(1)
     rot, _ = np.linalg.qr(rng.normal(size=(256, 256)))
     b.predict(np.asarray(raw @ rot, dtype="float32"))
-    assert any("same embedding space" in n for n in b.space_warning)
+    assert any("unrelated encoder" in n for n in b.space_warning)
 
 
 def test_an_audit_bundle_stores_no_embedding_space():
@@ -1889,3 +1889,40 @@ def test_an_audit_bundle_stores_no_embedding_space():
                             source="t", space=np.full(8, np.nan))
     assert not (out / "head.npz").exists()
     assert json.loads((out / "manifest.json").read_text())["has_head"] is False
+
+
+def test_two_files_declaring_different_encoders_are_refused():
+    """The measured conclusion: the geometry test catches 0 of 21 export pairs,
+    including the recorded failure. Comparing what the two files *say* is the only
+    thing here that sees a Core ML export against its own torch original."""
+    rng = np.random.default_rng(0)
+    a, b = rng.normal(size=(40, 128)), rng.normal(size=(40, 128))
+    with pytest.raises(SystemExit, match="different models"):
+        build.check_same_space(a, b, declared=["bioclip2", "bioclip2_cml4"])
+    assert build.check_same_space(a, b, declared=["bioclip2", "bioclip2"]) == []
+
+
+def test_the_geometry_warning_says_what_it_cannot_see():
+    """A warning that overstated its coverage would be worse than none: a reader
+    who saw no warning would conclude the pools matched."""
+    rng = np.random.default_rng(0)
+    d = 256
+    cone = rng.normal(size=d)
+    def pool(rot=None):
+        X = rng.normal(scale=0.5, size=(150, d)) + cone
+        if rot is not None:
+            X = X @ rot
+        return X / np.linalg.norm(X, axis=1, keepdims=True)
+    rot, _ = np.linalg.qr(rng.normal(size=(d, d)))
+    notes = build.check_same_space(pool(), pool(rot))
+    assert notes and "0 of 21" in notes[0]
+    assert "name the encoder in both files" in notes[0]
+
+
+def test_a_declared_encoder_is_read_from_the_file(tmp_path):
+    f = tmp_path / "e.npz"
+    np.savez(f, descriptor=np.zeros((4, 8), "float32"),
+             label=np.array(["a"] * 4), encoder="bioclip2_cml4")
+    rows = sources.from_embeddings(f)
+    assert rows.encoder == "bioclip2_cml4"
+    assert any("declares encoder" in n for n in rows.notes)
