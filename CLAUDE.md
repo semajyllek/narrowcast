@@ -1,7 +1,7 @@
 # narrowcast — orientation for a new session
 
 **Audit a classifier over a narrow label set, and the truth about how it will
-fail.** Public, MIT, pip-installable, 111 tests, CI on 3.10/3.12/3.13.
+fail.** Public, MIT, pip-installable, 123 tests, CI on 3.10/3.12/3.13.
 
 Extracted from [narrowcast-plantid](https://github.com/semajyllek/narrowcast-plantid), which remains
 the research record — **every number in the README traces to a findings doc
@@ -35,7 +35,7 @@ So no report ever prints coverage without the label-level share beside it.
 | module | does only |
 |---|---|
 | `sources.py` | embeddings / scores → `Rows`. **The tool never fetches and never encodes.** |
-| `cascade.py` | label/group/decline, declared `UTILITY`, threshold fitting, clustered splits with declared hazards stratified into both halves, per-label `suppress`, cluster bootstrap |
+| `cascade.py` | label/group/decline, the optional near-OOD gate, declared `UTILITY`, threshold fitting, clustered splits with declared hazards stratified into both halves, per-label `suppress`, cluster bootstrap |
 | `build.py` | head (embeddings path only), per-row scores, measurement, hazard union, bundle |
 | `card.py` | the report, the consequential-label gate, what a suppression cost, and the origin-composition section |
 | `labels.py` | label-list parsing and composition analysis |
@@ -97,6 +97,21 @@ why. We measured someone else's model; we did not obtain a copy of it.
 - BSD `sed` does not support `\b`, which silently half-completed a bulk rename.
 - `git merge -F -` does not read stdin; it fails and a following `push` succeeds
   as a no-op.
+- **An out-of-list row is wrong at *every* rank, and two parts of this tool
+  disagree about that.** `frame_from_posteriors` sets `true_group` to `__OTHER__`
+  for out-of-list rows, so `group_ok` is False by construction and `utility`
+  scores a group answer for one as `wrong` — the same payoff as a label answer.
+  But `outside_hazard_metrics` counts that identical answer as a **warning** and
+  therefore safe, because "it is an umbellifer" is a true statement that helps the
+  person holding the root. Both readings are defensible; holding both at once is
+  not. Reconciling them changes what `coverage` and `precision` mean on every card
+  ever printed, so it is a declared-utility decision needing its own pass and a
+  written reason — flagged, not resolved.
+  The first thing it cost: plantid's preferred **retreat** arm of the near-OOD
+  gate is arithmetically dead here. Retreating an out-of-list row moves it from
+  `wrong` to `wrong`, so `--gate-near-ood` declines instead. That is not a
+  departure from `NEAR_OOD_FINDINGS.md` but the same finding read under different
+  metric semantics — and the reject arm was preregistered and measured there too.
 - **Suppressing the hazard instead of the look-alike measures nothing.**
   `--never-answer` exists to make the model cautious about one thing, and the
   thing to name is the *harmless* label the hazard gets called — the wild carrot,
@@ -105,6 +120,15 @@ why. We measured someone else's model; we did not obtain a copy of it.
   argmax is the hazard were never in the numerator. Suppress it and they move
   LABEL → DECLINE, the rate is unchanged, and `named_correctly` goes to zero —
   same danger, less utility. The card used to recommend exactly this.
+- **The near-OOD gate is a greedy second stage, and it helps only where the
+  first stage answers too much.** Fitting three thresholds jointly at the same
+  resolution is 216,000 evaluations against 3,600 — about 90 seconds on a real
+  audit against 1.5 — and would mean rewriting `fit_thresholds`, whose
+  tie-breaking produced every threshold on file across four repos. So `t_group`
+  and `t_label` are fitted exactly as before and the gate is swept alone
+  afterwards. Safe because the sweep can always choose the baseline. The cost is
+  that where the declared payoffs already push `t_group` up to decline nearly
+  everything, there is no surviving error to remove and the gate reports zero.
 - **The suppression is applied after the fit, never inside it.** Thresholds are
   fitted as though nothing were suppressed, which is what makes the override's
   cost a delta the card can print. Folding it into `fit_thresholds` would absorb

@@ -1488,20 +1488,30 @@ def test_measuring_a_suppression_without_the_label_set_is_refused():
 
 # ---- the third threshold: retreat when the row looks out-of-list -------------
 
-def test_a_low_novelty_row_that_also_fails_the_group_threshold_still_declines():
-    """The one place the three-way order can silently invert. The novelty gate
-    *retreats* — label to group — and a retreat must never override a decline, or
-    the gate would start answering rows the cascade had rejected."""
-    lv = cascade.decide(np.array([0.9]), np.array([0.1]),   # group_conf below t_group
-                        t_group=0.5, t_label=0.5,
-                        novelty=np.array([0.0]), t_novel=0.9)
-    assert list(lv) == [build.DECLINE]
+def test_the_gate_declines_unconditionally_whatever_the_other_two_said():
+    """The one place the three-way order can silently invert. The gate is applied
+    last and declines outright: a gated row must not come back as a group answer
+    just because its group score was high."""
+    confident = cascade.decide(np.array([0.99]), np.array([0.99]),
+                               t_group=0.5, t_label=0.5,
+                               novelty=np.array([0.1]), t_novel=0.9)
+    assert list(confident) == [build.DECLINE]
+    already_declining = cascade.decide(np.array([0.9]), np.array([0.1]),
+                                       t_group=0.5, t_label=0.5,
+                                       novelty=np.array([0.0]), t_novel=0.9)
+    assert list(already_declining) == [build.DECLINE]
 
 
-def test_the_gate_retreats_a_confident_label_answer_to_the_group():
-    lv = cascade.decide(np.array([0.99]), np.array([0.99]), t_group=0.5, t_label=0.5,
-                        novelty=np.array([0.1]), t_novel=0.9)
-    assert list(lv) == [build.GROUP]
+def test_the_retreat_arm_could_not_pay_here_which_is_why_the_gate_rejects():
+    """plantid preferred retreating to the group rank. That arm is arithmetically
+    dead in narrowcast: no out-of-list row scores correct at any rank, so
+    retreating one moves it from `wrong` to `wrong`. Declining is worth
+    `decline_ood` instead. Pinned so the "improvement" back to retreat is caught."""
+    u = cascade.utility([build.LABEL, build.GROUP, build.DECLINE],
+                        label_ok=[False] * 3, group_ok=[False] * 3,
+                        in_catalog=[False] * 3)
+    assert u[0] == u[1] == cascade.UTILITY["wrong"]      # retreating changes nothing
+    assert u[2] == cascade.UTILITY["decline_ood"] > u[1]  # declining is the lever
 
 
 def test_without_a_gate_decide_is_exactly_what_it_was():
@@ -1535,3 +1545,167 @@ def test_a_reject_class_in_the_posteriors_is_not_one_of_the_users_labels(tmp_pat
     assert "3 labels" in r.stderr, r.stderr
     man = json.loads((tmp_path / "b" / "manifest.json").read_text())
     assert build.OTHER not in man["labels"]
+
+
+def _gate_frame(n_in=10, n_near=8, obs=3):
+    """The configuration the gate exists for, and the premise of the finding it
+    comes from: the closed-set confidences **cannot separate the buckets** — a
+    posterior over the user's labels has no way to say "none of these" — so the
+    near-OOD rows are named exactly as confidently as the in-list ones. Only the
+    reject mass tells them apart. If the confidences did separate them, `t_group`
+    would already be doing this job and the gate would have nothing to add."""
+    rng = np.random.default_rng(0)
+    rec = []
+    for i in range(n_in):
+        lab = f"G{i // 2} sp{i}"
+        for o in range(obs):
+            for _ in range(2):
+                rec.append({"label_conf": 0.90 + rng.uniform(0, .08),
+                            "group_conf": 0.93 + rng.uniform(0, .06),
+                            "label_ok": True, "group_ok": True, "in_catalog": True,
+                            "bucket": "in_catalog", "label": f"{lab}-o{o}",
+                            "group": lab.split()[0], "species": lab, "truth": lab,
+                            "pred_label": lab, "pred_group": lab.split()[0],
+                            "novelty": 0.90 + rng.uniform(0, .09)})
+    for k in range(n_near):
+        sp = f"G{k % 3} rel{k}"
+        for o in range(obs):
+            for _ in range(2):
+                rec.append({"label_conf": 0.90 + rng.uniform(0, .08),
+                            "group_conf": 0.93 + rng.uniform(0, .06),
+                            "label_ok": False, "group_ok": False, "in_catalog": False,
+                            "bucket": "near_ood", "label": f"{sp}-o{o}",
+                            "group": f"G{k % 3}", "species": sp, "truth": build.OTHER,
+                            "pred_label": f"G{k % 3} sp0", "pred_group": f"G{k % 3}",
+                            "novelty": 0.25 + rng.uniform(0, .15)})
+    return pd.DataFrame(rec)
+
+
+def test_the_gate_fires_and_pays_when_the_reject_mass_separates_the_buckets():
+    """Without this the suite cannot tell "the fit correctly turned it off" from
+    "the gate never works" — which is exactly how the dead retreat arm survived
+    two fixtures."""
+    m = build.fit_and_measure(_gate_frame(), p_ood=0.1, gate=True)
+    g = m["novelty_gate"]
+    assert g["fitted"] and not g["fit_turned_it_off"]
+    assert g["calib_utility_gained"] > 0
+    assert g["rows_declined"] > 0
+    assert g["near_ood_wrong_gated"] < g["near_ood_wrong_ungated"]
+    # and on this frame it removes exactly the rows that were wrong: near-OOD
+    # errors go to zero while the in-list label share does not move at all
+    assert g["near_ood_wrong_gated"] == 0.0
+    assert m["label_share"] == g["label_share_ungated"]
+
+
+def test_the_gate_has_nothing_to_add_where_the_fit_already_declines_everything():
+    """The cost of fitting it as a greedy second stage, made concrete. The gate
+    helps where stage one *answers* too much. Where the declared payoffs already
+    push stage one to decline nearly everything — a high `p_ood` with buckets the
+    closed-set scores cannot separate — there is no error left for it to remove,
+    and it correctly reports a gain of zero rather than adding declines."""
+    m = build.fit_and_measure(_gate_frame(), p_ood=0.3, gate=True)
+    assert m["novelty_gate"]["rows_declined"] == 0
+    assert m["novelty_gate"]["near_ood_wrong_ungated"] == 0.0
+
+
+def test_the_gate_never_scores_below_the_ungated_fit():
+    """The sweep starts at the minimum of novelty, and a strict `<` against the
+    minimum gates no row — so the fit can always choose the baseline. That is what
+    makes fitting this as a greedy second stage safe."""
+    noise = _e2e_frame()
+    # novelty that carries no signal about the buckets: the gate must still not
+    # be able to lose, it simply finds nothing worth thresholding
+    noise["novelty"] = np.random.default_rng(0).uniform(0.2, 1.0, len(noise))
+    for frame in (_gate_frame(), noise):
+        for p in (0.05, 0.1, 0.2, 0.3):
+            m = build.fit_and_measure(frame, p_ood=p, gate=True)
+            assert m["novelty_gate"]["calib_utility_gained"] >= 0.0
+
+
+def test_a_frame_with_no_reject_class_reports_the_gate_as_unreadable():
+    """Constant novelty means the posteriors carry no out-of-list class. Saying so
+    beats reporting a threshold that read a constant."""
+    m = build.fit_and_measure(_e2e_frame().assign(novelty=1.0), p_ood=0.3, gate=True)
+    assert m["novelty_gate"]["fitted"] is False
+    assert "no out-of-list class" in m["novelty_gate"]["reason"]
+    assert m["t_novel"] is None
+
+
+def test_no_gate_requested_leaves_the_decision_byte_identical():
+    """The whole point of staging: asking for no gate must produce exactly the
+    numbers the tool produced before there was one."""
+    f = _gate_frame()
+    a = build.fit_and_measure(f, p_ood=0.3)
+    b = build.fit_and_measure(f, p_ood=0.3, gate=True)
+    assert a["t_group"] == b["t_group"] and a["t_label"] == b["t_label"]
+    assert a["novelty_gate"] is None and a["t_novel"] is None
+
+
+def test_a_gate_the_fit_turned_off_is_not_written_into_the_bundle():
+    """A threshold at the bottom of the calibration grid gates nothing *there* and
+    can still catch a test row below that minimum. `predict` would then apply a
+    decline rule the fit had explicitly declined to adopt."""
+    m = build.fit_and_measure(_gate_frame(), p_ood=0.3, gate=True)
+    assert m["novelty_gate"]["fit_turned_it_off"] is True
+    assert m["t_novel"] is None
+
+
+def test_the_card_does_not_call_a_turned_off_gate_a_win():
+    """plantid measured this gate as a utility null and did not ship it. A card
+    that implied otherwise would overstate a result its own source declines."""
+    from narrowcast.card import _gate_section
+    off = "\n".join(_gate_section({"fitted": True, "fit_turned_it_off": True,
+                                   "t_novel": 0.1, "calib_utility_gained": 0.0}))
+    assert "turned off by the fit" in off and "utility null" in off
+    unread = "\n".join(_gate_section({"fitted": False, "reason": "no out-of-list class"}))
+    assert "not fitted" in unread
+    on = "\n".join(_gate_section({
+        "fitted": True, "fit_turned_it_off": False, "t_novel": 0.94,
+        "calib_utility_gained": 0.12, "rows_declined": 27,
+        "near_ood_wrong_ungated": 0.516, "near_ood_wrong_gated": 0.094,
+        "label_share_ungated": 0.981}))
+    assert "51.6% → 9.4%" in on
+    assert "declines** rather than retreating" in on
+
+
+def test_predict_applies_the_gate_and_says_so(tmp_path):
+    """Fourth place in the seam. A `t_novel` in the manifest that `predict`
+    ignored would leave the card describing a model nobody runs."""
+    from narrowcast import predict as P
+    rng = np.random.default_rng(4)
+    cent = {f"G{i // 2} sp{i}": rng.normal(size=24) for i in range(6)}
+    def blk(names, n, scale):
+        v, l, g, c = [], [], [], []
+        for nm in names:
+            mu = cent.get(nm, rng.normal(scale=3.0, size=24))
+            for o in range(n):
+                v.append(mu + rng.normal(scale=scale, size=24))
+                l.append(nm); g.append(nm.split()[0]); c.append(f"{nm}-o{o}")
+        return sources._finish(l, descriptor=np.array(v, "float32"), group=g, cluster=c)
+    fg = blk(list(cent), 10, 0.3)
+    bg = blk([f"Far{i} sp{i}" for i in range(8)], 8, 0.5)
+    ds = build.load_rows(fg, "enc", background=bg)
+    assert build.OTHER in set(ds.y_train.tolist()), "no reject class to gate with"
+    clf = build.fit_head(ds)
+    metrics = build.fit_and_measure(build.score_frame(clf, ds), p_ood=0.1, gate=True)
+    # The fit is free to turn the gate off on an easy fixture, and on this one it
+    # does. What is under test here is the *seam* — that a threshold in the
+    # manifest reaches the decision — so it is set explicitly. Whether the fit
+    # chooses one is pinned separately, on a frame where it pays.
+    assert metrics["novelty_gate"]["fitted"]
+    nov = np.sort(np.concatenate([
+        build.score_frame(clf, ds)["novelty"].to_numpy()]))
+    forced = float(nov[len(nov) // 2])
+    out = build.save_bundle(tmp_path / "b", clf, fg.labels, "enc",
+                            {**metrics, "t_novel": forced}, {}, ds.counts, source="t")
+
+    b = P.Bundle(out)
+    assert b.t_novel == forced
+    assert any("declined outright" in n for n in b.notes)
+    res = b.predict(np.vstack([np.asarray(fg.descriptor, "float32"),
+                               np.asarray(bg.descriptor, "float32")]))
+    low = [r for r in res if r["novelty"] < forced]
+    high = [r for r in res if r["novelty"] >= forced]
+    assert low and high, "the threshold splits nothing; the assertions are vacuous"
+    assert all(r["rank"] == build.DECLINE for r in low)
+    assert any(r["rank"] != build.DECLINE for r in high)

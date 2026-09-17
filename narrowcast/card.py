@@ -118,6 +118,47 @@ def _suppress_hint(measured: dict, fails: list) -> str:
               "else, and those rows are already not it.")
 
 
+def _gate_section(g: dict | None) -> list:
+    """What the near-OOD gate did, or that it declined to do anything.
+
+    plantid fitted this gate, measured a **utility null** at its own payoffs, and
+    did not ship it (`NEAR_OOD_FINDINGS.md`). So this section reports an outcome
+    and never implies the gate is an established win: if the fit turned it off at
+    the caller's declared payoffs, that is what it says.
+    """
+    if not g:
+        return []
+    L = ["## The near-OOD gate", ""]
+    if not g.get("fitted"):
+        return L + [f"Requested, and **not fitted**: {g['reason']}.", ""]
+    if g["fit_turned_it_off"]:
+        return L + [
+            "Fitted and **turned off by the fit**. At the payoffs you declared, "
+            "declining rows whose mass sits outside the label set buys nothing "
+            "this cascade was not already getting from its other two thresholds. "
+            "That is a result, not a failure — plantid measured this gate as a "
+            "utility null too, at `wrong = -4`.", ""]
+    ung, gat = g["near_ood_wrong_ungated"], g["near_ood_wrong_gated"]
+    L += [f"Fitted at `t_novel` **{g['t_novel']:.3f}**: a row keeping less than "
+          f"that share of its mass inside your label set is declined outright, "
+          f"whatever the other two thresholds said. {g['rows_declined']} test "
+          f"rows were declined that would otherwise have been answered.", ""]
+    if ung is not None and gat is not None:
+        L += [f"On the relatives you did not choose — the bucket this exists for — "
+              f"the wrong-answer rate goes **{_pct(ung)} → {_pct(gat)}**.", ""]
+    if g["label_share_ungated"] is not None:
+        L += [f"It is paid for out of the label-level share, which goes from "
+              f"{_pct(g['label_share_ungated'])} to the figure at the top of this "
+              f"card. If those two are equal, the gate removed only rows that "
+              f"were going to be wrong.", ""]
+    L += ["The gate **declines** rather than retreating to the group rank. "
+          "plantid preferred retreating, because there an unlisted congener "
+          "answered at its own genus counted as correct; here no out-of-list row "
+          "is correct at any rank, so retreating one would move it from wrong to "
+          "wrong and only declining changes anything.", ""]
+    return L
+
+
 def _suppression_section(sup: dict | None) -> list:
     """What `--never-answer` bought and what it cost.
 
@@ -543,6 +584,7 @@ def render(manifest: dict) -> str:
 
     L += _hazard_section(m.get("hazard") or {})
     L += _absent_hazard_section(m.get("hazard_absent") or {})
+    L += _gate_section(m.get("novelty_gate"))
     L += _suppression_section(m.get("suppression"))
 
     L += ["## Where it declines and where it errs", "", "| bucket | n | answered | correct when answered |",

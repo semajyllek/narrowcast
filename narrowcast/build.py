@@ -38,6 +38,7 @@ from narrowcast.cascade import (
     cluster_bootstrap,
     decide,
     deployment_weights,
+    fit_novelty_threshold,
     fit_thresholds,
     group_matrix,
     hazard_rows,
@@ -335,6 +336,16 @@ def frame_from_posteriors(proba, classes, ds: Dataset) -> pd.DataFrame:
     gmat, ug = group_matrix(classes, mask, gmap)
 
     cata = proba[:, mask]
+    # The near-OOD gate's input: the share of mass that stayed inside the label
+    # set, i.e. 1 - P(__OTHER__). Computed here and nowhere else, because this is
+    # the single seam an audited model and a fitted one share -- recomputing it in
+    # `predict` or in the fit would be exactly the fork CLAUDE.md pins with a test.
+    # A ratio rather than a subtraction because `proba` need not sum to 1. With no
+    # reject class the share is 1 for every row and the gate is inert, which is
+    # the right degradation: `predict.Bundle.notes` already says there is nothing
+    # to reject with.
+    total = np.clip(proba.sum(1), 1e-12, None)
+    novelty = cata.sum(1) / total
     gscore = cata @ gmat.T
     sp_pred = classes[mask][cata.argmax(1)]
     gp_pred = ug[gscore.argmax(1)]
@@ -351,6 +362,7 @@ def frame_from_posteriors(proba, classes, ds: Dataset) -> pd.DataFrame:
     return pd.DataFrame({
         "label_conf": cata.max(1),
         "group_conf": gscore.max(1),
+        "novelty": novelty,
         "label_ok": sp_pred == ds.truth,
         "group_ok": gp_pred == true_group,
         "pred_label": sp_pred,
@@ -570,7 +582,8 @@ def _group_members(labels, groups) -> dict | None:
 
 def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
                     hazards=None, groups=None, utility=None,
-                    hazards_absent=None, never_answer=None, labels=None) -> dict:
+                    hazards_absent=None, never_answer=None, labels=None,
+                    gate=False) -> dict:
     """Fit thresholds on a clustered calibration half, report on the other.
 
     `groups` is the caller's label -> group map, needed by `hazard_metrics` so a
@@ -610,6 +623,18 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
         cal["in_catalog"].to_numpy(), sample_weight=w_cal, weights=utility,
     )
 
+    # Stage two: the near-OOD gate, fitted alone with the first two fixed. See
+    # `cascade.fit_novelty_threshold` for why it is staged rather than joint, and
+    # for the guarantee that makes staging safe -- the sweep can always choose the
+    # ungated baseline, so this cannot score below the fit above.
+    tn, gate_gain = (None, None)
+    if gate and "novelty" in cal:
+        tn, gate_gain = fit_novelty_threshold(
+            cal["label_conf"].to_numpy(), cal["group_conf"].to_numpy(),
+            cal["novelty"].to_numpy(), cal["label_ok"].to_numpy(),
+            cal["group_ok"].to_numpy(), cal["in_catalog"].to_numpy(),
+            tg, ts, weights=utility, sample_weight=w_cal)
+
     # Headroom -- coarse-rank accuracy minus fine-rank accuracy -- governs whether
     # the cascade retreats to the group rank at all (plantid's
     # HEADROOM_FINDINGS.md: CV R^2 0.883 over 1,409 arms, against 0.362 for fine
@@ -635,7 +660,8 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     # Fitted first, suppressed after. `cascade.suppress` explains why the override
     # is kept out of `fit_thresholds`: leaving it out is what makes its cost a
     # measurable delta rather than something the operating point absorbs.
-    lv_open = decide(te["label_conf"].to_numpy(), te["group_conf"].to_numpy(), tg, ts)
+    lv_open = decide(te["label_conf"].to_numpy(), te["group_conf"].to_numpy(), tg, ts,
+                     te["novelty"].to_numpy() if tn is not None else None, tn)
     if never_answer and not labels:
         # Without the label set `_group_members` is None, so the measurement would
         # suppress label answers only while `Bundle.predict` — which always builds
@@ -686,6 +712,61 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
     # tool refuses to report: a caller suppressing `Daucus carota` gives up every
     # correct wild-carrot answer, and that trade is theirs to make with the figure
     # in front of them.
+    # What the gate did, measured rather than asserted. plantid fitted this and
+    # found a utility null at its own payoffs, so a card that implied the gate was
+    # an established win would be overstating a result its own source doc
+    # declines to make. If the fit turned it off, that is what gets printed.
+    gate_report = None
+    if gate:
+        nov_all = te["novelty"].to_numpy() if "novelty" in te else None
+        flat = nov_all is not None and float(np.ptp(nov_all)) < 1e-9
+        if tn is None or flat:
+            # No out-of-list class in the posteriors means the in-list mass share
+            # is 1 for every row, so there is no signal to threshold. This is the
+            # normal case under `--scores` unless the caller's own model has a
+            # reject class, and it is worth saying rather than reporting a
+            # threshold that read a constant.
+            gate_report = {
+                "fitted": False,
+                "reason": "the posteriors carry no out-of-list class, so "
+                          "1 - P(__OTHER__) is 1 on every row and there is "
+                          "nothing for the gate to read"
+                          if flat else "no novelty column in the frame"}
+            tn = None
+        else:
+            ungated = decide(te["label_conf"].to_numpy(),
+                             te["group_conf"].to_numpy(), tg, ts)
+            nm = te["bucket"].to_numpy() == "near_ood"
+            def _wrong(levels, m):
+                if not m.any():
+                    return None
+                ans = levels[m] != DECLINE
+                ok = ((levels[m] == LABEL) & te["label_ok"].to_numpy()[m]) | \
+                     ((levels[m] == GROUP) & te["group_ok"].to_numpy()[m])
+                return float((ans & ~ok).mean())
+            gate_report = {
+                "fitted": True,
+                "t_novel": float(tn),
+                "calib_utility_gained": float(gate_gain),
+                # The fit was free to choose a threshold that gates nothing, and
+                # did. Reported as the result it is: at these declared payoffs the
+                # gate does not pay, which is what plantid found at `wrong = -4`.
+                "fit_turned_it_off": bool(gate_gain <= 0.0),
+                "rows_declined": int(((ungated != DECLINE) & (lv_open == DECLINE)).sum()),
+                "near_ood_wrong_ungated": _wrong(ungated, nm),
+                "near_ood_wrong_gated": _wrong(lv_open, nm),
+                "label_share_ungated": float((ungated[inc] == LABEL).mean())
+                if inc.any() else None,
+            }
+            if gate_report["fit_turned_it_off"]:
+                # The bundle carries no gate at all rather than one fitted to the
+                # bottom of the grid. A threshold that gates nothing on the
+                # calibration half can still gate a test row that fell below its
+                # minimum, and `predict` would then apply a decline rule the fit
+                # had explicitly declined to adopt.
+                tn = None
+                lv_open = ungated
+
     suppression = None
     if never_answer:
         lost = (lv_open != DECLINE) & (lv == DECLINE)
@@ -703,6 +784,8 @@ def fit_and_measure(df: pd.DataFrame, p_ood: float, seed: int = 0,
 
     return {
         "t_group": float(tg), "t_label": float(ts), "p_ood": p_ood,
+        "t_novel": None if tn is None else float(tn),
+        "novelty_gate": gate_report,
         "suppression": suppression,
         "coverage": float(w[answered].sum() / w.sum()),
         "precision": float(w[answered & correct].sum() / w[answered].sum())

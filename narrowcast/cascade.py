@@ -83,11 +83,40 @@ def group_matrix(classes, mask, group_map=None):
     return np.stack([(groups == g).astype(float) for g in ug]), ug
 
 
-def decide(label_conf, group_conf, t_group, t_label):
-    """Vectorised cascade -> array of LABEL / GROUP / DECLINE."""
+def decide(label_conf, group_conf, t_group, t_label, novelty=None, t_novel=None):
+    """Vectorised cascade -> array of LABEL / GROUP / DECLINE.
+
+    The optional third threshold is the **near-OOD gate**: a row whose mass sits
+    mostly outside the label set is declined outright, whatever the other two
+    thresholds said about it.
+
+    **It is the reject arm, and plantid preferred the retreat arm.** That is not a
+    departure from `NEAR_OOD_FINDINGS.md` but the consequence of reading it here.
+    There, retreating beat rejecting (near-OOD wrong -0.0995 against -0.0695)
+    because a near-OOD congener answered at the genus rank scored *correct* --
+    an unlisted *Lomatium* called "Lomatium" is right. narrowcast scores no
+    out-of-list row as correct at any rank: `frame_from_posteriors` sets
+    `true_group` to `__OTHER__` for them, so `group_ok` is False by construction
+    and retreating moves a row from `wrong` to `wrong`. **The retreat arm cannot
+    pay here at any declared payoffs** -- it is arithmetic, not a fit that judged
+    it unhelpful. Declining can: `decline_ood` is +1.0 against `wrong` at -4.0,
+    and at -20.0 under `forage`.
+
+    **Order is load-bearing, and the decline is unconditional.** The gate is
+    applied last, so a gated row declines whatever `label_conf` and `group_conf`
+    said. A gate that only downgraded the rank would be the dead arm above.
+
+    `novelty` here is the in-list mass share, `1 - P(__OTHER__)` -- not the
+    centroid geometry plantid's primary arm used. The two are statistically level
+    (-0.0901 against -0.0995, overlapping intervals) and this one is free: the
+    column is already computed and was being discarded. Where no reject class
+    exists the share is 1 everywhere, the gate is constant, and it gates nothing.
+    """
     out = np.full(len(label_conf), LABEL, dtype=object)
     out[label_conf < t_label] = GROUP
     out[group_conf < t_group] = DECLINE
+    if novelty is not None and t_novel is not None:
+        out[np.asarray(novelty, float) < t_novel] = DECLINE
     return out
 
 
@@ -206,6 +235,68 @@ def fit_thresholds(label_conf, group_conf, label_ok, group_ok, in_catalog,
             if u > best_u:
                 best, best_u = (float(tg), float(ts)), u
     return best, best_u
+
+
+def fit_novelty_threshold(label_conf, group_conf, novelty, label_ok, group_ok,
+                          in_catalog, t_group, t_label, weights=None, n_grid=60,
+                          sample_weight=None):
+    """Fit the near-OOD gate alone, with the other two thresholds already fixed.
+
+    The gate declines; see `decide` for why the retreat arm plantid preferred is
+    structurally unable to pay here. That difference traces to an asymmetry worth
+    knowing about: `build.outside_hazard_metrics` treats a group answer naming an
+    out-of-list row's own group as a *warning* and therefore safe, while `utility`
+    scores the identical answer as `wrong`. Two parts of one tool disagree about
+    whether a true coarse statement about an out-of-list row is worth anything.
+    Reconciling them is a declared-utility change and wants its own pass with a
+    written reason; it is flagged here, not resolved.
+
+    **Staged, not joint, and that is a deliberate trade.** A 3-D grid at the same
+    resolution is 216,000 evaluations against 3,600 -- about 90 seconds on a real
+    audit where the current fit takes 1.5 -- and reaching it would mean rewriting
+    `fit_thresholds`, whose tie-breaking produced every threshold on file across
+    four repositories. Fitting the gate as a second stage costs `3600 + 60`
+    instead, and leaves the first two thresholds byte-identical to what they were
+    when no gate is asked for.
+
+    What the staging costs, stated rather than discovered later: the joint optimum
+    over three thresholds is not reached, and `t_group`/`t_label` were fitted
+    against a decision rule this gate then changes. Both are acceptable because
+    the sweep **can always choose the baseline** -- the grid starts at the minimum
+    of `novelty`, and a strict `<` against the minimum gates no row -- so the
+    fitted gate cannot score below the ungated fit on the calibration half.
+
+    The concrete shape of that cost: **the gate helps where the first stage
+    answers too much.** Where the declared payoffs already drive `t_group` up to
+    decline nearly everything -- a high `p_ood` over buckets the closed-set scores
+    cannot separate -- there is no surviving error for it to remove, and it
+    reports a gain of zero. On the test fixture it takes near-OOD wrong from 0.958
+    to 0.000 at `p_ood = 0.10` **without moving the in-list label share at all**,
+    and is inert at 0.30.
+
+    Returns `(t_novel, utility_gained)`; a gain of 0.0 means the fit turned the
+    gate off, which is a result and not a failure. plantid measured this gate as a
+    utility **null** at `wrong = -4` and `p_ood = 0.20` and did not ship it. It is
+    fitted here rather than assumed precisely so a caller declaring different
+    payoffs -- `forage` costs a wrong answer -20, and near-OOD is where a
+    forager's hazard lives -- gets the answer for their stakes, not plantid's.
+    """
+    sw = np.ones(len(label_conf)) if sample_weight is None else np.asarray(sample_weight, float)
+    sw = sw / sw.sum()
+    novelty = np.asarray(novelty, float)
+
+    def u_at(tn):
+        lv = decide(label_conf, group_conf, t_group, t_label, novelty, tn)
+        return float(np.dot(utility(lv, label_ok, group_ok, in_catalog, weights), sw))
+
+    grid = np.quantile(novelty, np.linspace(0, 1, n_grid))
+    base = u_at(grid[0])                    # gates nothing: strict < against the min
+    best, best_u = float(grid[0]), base
+    for tn in grid[1:]:
+        u = u_at(float(tn))
+        if u > best_u:
+            best, best_u = float(tn), u
+    return best, best_u - base
 
 
 # A split key is too coarse when one cluster can swallow a whole side of the

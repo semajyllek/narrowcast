@@ -53,6 +53,11 @@ class Bundle:
 
         m = self.manifest["metrics"]
         self.t_group, self.t_label = float(m["t_group"]), float(m["t_label"])
+        # The near-OOD gate, when one was fitted. Read from the manifest rather
+        # than refitted: the card describes a model that answers under this
+        # threshold, and a bundle that ignored it would be a different model.
+        tn = m.get("t_novel")
+        self.t_novel = None if tn is None else float(tn)
         self.encoder = self.manifest["encoder"]
         self.version = self.manifest.get("bundle_version", 1)
         self.groups = self.manifest.get("groups") or None
@@ -81,6 +86,11 @@ class Bundle:
                 f"{len(self.never_answer)} label(s) suppressed at predict time and "
                 f"never answered: " + ", ".join(sorted(self.never_answer))
                 + " — the same suppression the card was measured under")
+        if self.t_novel is not None and OTHER in set(self.classes.tolist()):
+            out.append(
+                f"a near-OOD gate is fitted at t_novel={self.t_novel:.3f}: a row "
+                "keeping less than that share of its mass inside the label set is "
+                "declined outright, whatever the other two thresholds say")
         if OTHER not in set(self.classes.tolist()):
             out.append(
                 "no reject class was fitted, so this model cannot decline for "
@@ -107,13 +117,19 @@ class Bundle:
         (`max_c P(c) <= max_g sum P(c)`), which is what makes two independent
         thresholds a well-ordered three-way decision rather than two guesses.
         """
-        cata = self.proba(X)[:, self.mask]
+        full = self.proba(X)
+        cata = full[:, self.mask]
+        # Same arithmetic as `build.frame_from_posteriors`, which is the only
+        # other place this is computed. `proba` here is a softmax and sums to 1,
+        # but the ratio form is kept so the two cannot drift.
+        novelty = cata.sum(1) / np.clip(full.sum(1), 1e-12, None)
         gscore = cata @ self.gmat.T
         names = self.classes[self.mask]
         label_conf, group_conf = cata.max(1), gscore.max(1)
         pred_label = names[cata.argmax(1)]
         pred_group = self.ugroups[gscore.argmax(1)]
-        lv = decide(label_conf, group_conf, self.t_group, self.t_label)
+        lv = decide(label_conf, group_conf, self.t_group, self.t_label,
+                    novelty if self.t_novel is not None else None, self.t_novel)
         if self.never_answer:
             members = {}
             for j, g in enumerate(self.ugroups):
@@ -130,6 +146,7 @@ class Bundle:
                 "label": label, "group": group,
                 "label_conf": float(label_conf[i]),
                 "group_conf": float(group_conf[i]),
+                "novelty": float(novelty[i]),
             })
         return out
 
